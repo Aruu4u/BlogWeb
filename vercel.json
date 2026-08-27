@@ -13,7 +13,7 @@
     },
     {
       "src": "/(.*)",
-      "dest": "/frontend_v2/$1"
+      "dest": "/public/$1"
     }
   ]
 }
