@@ -12,8 +12,10 @@ from routes.users import router as users
 
 
 from fastapi.middleware.cors import CORSMiddleware
-app = FastAPI(root_path="/api")
-
+app = FastAPI()
+@app.get("/test")
+def test():
+    return {"status": "FastAPI is working"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,12 +26,6 @@ app.add_middleware(
 
 models.Base.metadata.create_all(bind=engine)
 
-@app.get("/test")
-def test():
-    return {
-        "status": "FastAPI is working",
-        "message": "Vercel backend is connected"
-    }
 
 app.include_router(users)
 app.include_router(auth)
