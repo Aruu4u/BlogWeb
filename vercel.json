@@ -8,12 +8,12 @@
   ],
   "routes": [
     {
-      "src": "/(.*\\.(js|css|png|jpg|jpeg|gif|svg|ico|webp))",
-      "dest": "/public/$1"
+      "src": "/api/(.*)",
+      "dest": "/main.py"
     },
     {
       "src": "/(.*)",
-      "dest": "/main.py"
+      "dest": "/frontend_v2/$1"
     }
   ]
 }
