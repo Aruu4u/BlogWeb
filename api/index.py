@@ -24,6 +24,12 @@ app.add_middleware(
 
 models.Base.metadata.create_all(bind=engine)
 
+@app.get("/test")
+def test():
+    return {
+        "status": "FastAPI is working",
+        "message": "Vercel backend is connected"
+    }
 
 app.include_router(users)
 app.include_router(auth)
