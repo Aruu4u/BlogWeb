@@ -1,0 +1,7 @@
+The repository handles:
+
+database queries
+joins
+counts
+authorization/business logic
+constructing the result

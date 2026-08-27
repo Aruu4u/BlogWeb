@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Luminova - an independent press for people who write their own stories." />
+  <title>Luminova &mdash; Where Ideas Glow</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,500..900&family=DM+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,300..700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <!-- Paper stock: fine grain multiplied over everything -->
+  <div class="grain" aria-hidden="true"></div>
+
+  <!-- Registration / crop marks at the sheet corners -->
+  <div class="reg-marks" aria-hidden="true">
+    <span class="reg-mark reg-mark--tl"></span>
+    <span class="reg-mark reg-mark--tr"></span>
+    <span class="reg-mark reg-mark--bl"></span>
+    <span class="reg-mark reg-mark--br"></span>
+  </div>
+
+  <!-- Full-window file drag shield: lights up when files enter the window -->
+  <div class="drag-shield" id="drag-shield" aria-hidden="true">
+    <span class="drag-shield-note">Release to place</span>
+  </div>
+
+  <div id="toast-container" class="toast-stack" role="status" aria-live="polite"></div>
+
+  <!-- ============================= MASTHEAD ============================= -->
+  <header class="masthead" id="masthead">
+    <div class="masthead-inner">
+      <a href="#/" class="brand" aria-label="Luminova, home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none">
+            <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2.5" />
+            <path d="M16 3v26M3 16h26" stroke="currentColor" stroke-width="1" opacity=".55" />
+          </svg>
+        </span>
+        <span class="brand-word plate" data-plate="Luminova">Luminova</span>
+      </a>
+
+      <form class="masthead-search" id="masthead-search" role="search" onsubmit="return false;">
+        <label class="visually-hidden" for="global-search">Search stories</label>
+        <svg class="search-glyph" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7.5" />
+          <line x1="21" y1="21" x2="16.8" y2="16.8" />
+        </svg>
+        <input type="search" id="global-search" class="search-field" placeholder="Search stories" autocomplete="off" />
+        <kbd class="search-kbd">/</kbd>
+      </form>
+
+      <nav class="masthead-nav" aria-label="Main">
+        <a href="#/" class="nav-link" data-nav="feed"><span>Feed</span></a>
+        <a href="#/create" class="nav-link auth-only" data-nav="create"><span>Write</span></a>
+
+        <div class="nav-guest guest-only">
+          <a href="#/login" class="btn btn-quiet btn-sm">Log in</a>
+          <a href="#/signup" class="btn btn-ink btn-sm">Sign up</a>
+        </div>
+
+        <div class="nav-account auth-only" id="user-menu">
+          <button class="account-btn" id="user-avatar-btn" aria-haspopup="true" aria-expanded="false">
+            <img id="nav-avatar" class="account-avatar" src="" alt="" />
+            <span id="nav-username" class="account-name"></span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
+              aria-hidden="true">
+              <polyline points="5 9 12 16 19 9" />
+            </svg>
+          </button>
+          <div class="account-menu" id="user-dropdown" role="menu">
+            <a href="#/profile" class="menu-item" role="menuitem">Your desk</a>
+            <a href="#/create" class="menu-item" role="menuitem">New story</a>
+            <div class="menu-rule"></div>
+            <button class="menu-item menu-item--exit" id="logout-btn" role="menuitem">Log out</button>
+          </div>
+        </div>
+      </nav>
+
+      <button class="burger" id="hamburger" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+
+    <div class="mobile-tray" id="mobile-menu">
+      <a href="#/" class="tray-link" data-nav="feed">Feed</a>
+      <a href="#/create" class="tray-link auth-only" data-nav="create">Write</a>
+      <a href="#/profile" class="tray-link auth-only" data-nav="profile">Your desk</a>
+      <div class="tray-rule"></div>
+      <a href="#/login" class="tray-link guest-only">Log in</a>
+      <a href="#/signup" class="tray-link guest-only">Sign up</a>
+      <button class="tray-link tray-link--exit auth-only" id="mobile-logout-btn">Log out</button>
+    </div>
+  </header>
+
+  <main id="app">
+
+    <!-- ============================== FEED ============================== -->
+    <section id="page-feed" class="page">
+      <div class="hero">
+        <div class="hero-inner">
+          <p class="eyebrow" id="hero-eyebrow">Independent press</p>
+          <h1 class="hero-title">
+            <span class="hero-line">Where</span>
+            <span class="hero-line">ideas</span>
+            <span class="hero-line hero-line--accent plate" data-plate="glow">glow</span>
+          </h1>
+          <p class="hero-lede">
+            Stories, notes and arguments from the people who wrote them. Nothing syndicated, nothing sponsored.
+          </p>
+          <form class="hero-search" role="search" onsubmit="return false;">
+            <label class="visually-hidden" for="hero-search-input">Search stories</label>
+            <input type="search" id="hero-search-input" class="hero-search-field" placeholder="Search by title or text"
+              autocomplete="off" />
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+              stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7.5" />
+              <line x1="21" y1="21" x2="16.8" y2="16.8" />
+            </svg>
+          </form>
+        </div>
+        <div class="hero-rule" aria-hidden="true"></div>
+      </div>
+
+      <div class="sheet">
+        <div class="run-bar">
+          <p class="run-count" id="feed-result-count"></p>
+          <div class="ink-switch" id="sort-toggle" role="tablist" aria-label="Sort order">
+            <span class="ink-switch-slider" aria-hidden="true"></span>
+            <button class="ink-switch-btn is-on" data-sort="newest" role="tab" aria-selected="true">Newest</button>
+            <button class="ink-switch-btn" data-sort="oldest" role="tab" aria-selected="false">Oldest</button>
+          </div>
+        </div>
+
+        <div class="story-grid" id="blog-grid"></div>
+
+        <div class="story-grid" id="feed-skeleton" aria-hidden="true"></div>
+
+        <nav class="pagination" id="pagination" aria-label="Pages"></nav>
+
+        <div class="blank-state" id="feed-empty" hidden>
+          <p class="blank-mark" aria-hidden="true">&#9633;</p>
+          <h3>Nothing in this run</h3>
+          <p>Try a different search, or publish the first one.</p>
+          <a href="#/create" class="btn btn-ink btn-sm auth-only">Write a story</a>
+          <a href="#/signup" class="btn btn-ink btn-sm guest-only">Create an account</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== STORY DETAIL ========================== -->
+    <section id="page-blog" class="page">
+      <div class="sheet sheet--narrow">
+        <div id="blog-detail-skeleton" class="detail-skeleton" aria-hidden="true">
+          <span class="sk sk-line" style="width:22%;height:12px"></span>
+          <span class="sk sk-line" style="width:88%;height:52px;margin-top:26px"></span>
+          <span class="sk sk-line" style="width:60%;height:52px"></span>
+          <span class="sk sk-line" style="width:34%;height:14px;margin-top:24px"></span>
+          <span class="sk sk-block" style="height:340px;margin-top:32px"></span>
+          <span class="sk sk-line" style="width:100%;margin-top:32px"></span>
+          <span class="sk sk-line" style="width:96%"></span>
+          <span class="sk sk-line" style="width:99%"></span>
+          <span class="sk sk-line" style="width:72%"></span>
+        </div>
+        <article id="blog-detail-content" hidden></article>
+      </div>
+    </section>
+
+    <!-- ============================== LOGIN ============================== -->
+    <section id="page-login" class="page page--gate">
+      <div class="gate">
+        <div class="gate-card">
+          <p class="eyebrow">Members</p>
+          <h2 class="gate-title plate" data-plate="Welcome back">Welcome back</h2>
+          <form id="login-form" class="stack-form" novalidate>
+            <div class="field">
+              <input type="email" id="login-email" required autocomplete="email" placeholder=" " />
+              <label for="login-email">Email</label>
+            </div>
+            <div class="field">
+              <input type="password" id="login-password" required autocomplete="current-password" placeholder=" " />
+              <label for="login-password">Password</label>
+              <button type="button" class="reveal-btn password-toggle" aria-label="Show password">
+                <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round">
+                  <path d="M1 12s4-7.5 11-7.5S23 12 23 12s-4 7.5-11 7.5S1 12 1 12z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" style="display:none">
+                  <path d="M17.9 17.9A10 10 0 0 1 12 19.5C5 19.5 1 12 1 12a18.4 18.4 0 0 1 5-5.9M9.9 4.2A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2m-6.7-1.1a3 3 0 1 1-4.2-4.2" />
+                  <line x1="2" y1="2" x2="22" y2="22" />
+                </svg>
+              </button>
+            </div>
+            <p class="field-error" id="login-error" role="alert"></p>
+            <button type="submit" class="btn btn-ink btn-lg btn-block">
+              <span class="btn-text">Log in</span><span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </form>
+          <p class="gate-foot">No account yet? <a href="#/signup">Sign up</a></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== SIGNUP ============================= -->
+    <section id="page-signup" class="page page--gate">
+      <div class="gate">
+        <div class="gate-card">
+          <p class="eyebrow">Join</p>
+          <h2 class="gate-title plate" data-plate="Start publishing">Start publishing</h2>
+          <form id="signup-form" class="stack-form" novalidate>
+            <div class="field">
+              <input type="email" id="signup-email" required autocomplete="email" placeholder=" " />
+              <label for="signup-email">Email</label>
+            </div>
+            <div class="field">
+              <input type="password" id="signup-password" required autocomplete="new-password" minlength="6"
+                placeholder=" " />
+              <label for="signup-password">Password</label>
+              <button type="button" class="reveal-btn password-toggle" aria-label="Show password">
+                <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round">
+                  <path d="M1 12s4-7.5 11-7.5S23 12 23 12s-4 7.5-11 7.5S1 12 1 12z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" style="display:none">
+                  <path d="M17.9 17.9A10 10 0 0 1 12 19.5C5 19.5 1 12 1 12a18.4 18.4 0 0 1 5-5.9M9.9 4.2A9.1 9.1 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2m-6.7-1.1a3 3 0 1 1-4.2-4.2" />
+                  <line x1="2" y1="2" x2="22" y2="22" />
+                </svg>
+              </button>
+              <p class="field-hint">At least 6 characters.</p>
+            </div>
+            <p class="field-error" id="signup-error" role="alert"></p>
+            <button type="submit" class="btn btn-ink btn-lg btn-block">
+              <span class="btn-text">Create account</span><span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </form>
+          <p class="gate-foot">Already a member? <a href="#/login">Log in</a></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== WRITE ============================== -->
+    <section id="page-create" class="page">
+      <div class="sheet">
+        <div class="desk-head">
+          <p class="eyebrow">New story</p>
+          <h1 class="desk-title plate" data-plate="Set your page">Set your page</h1>
+        </div>
+
+        <div class="desk-layout">
+          <form id="create-form" class="composer" novalidate>
+            <div class="field field--bare">
+              <label class="visually-hidden" for="create-title">Title</label>
+              <input type="text" id="create-title" class="composer-title" placeholder="Title" maxlength="200"
+                required />
+              <p class="counter"><span id="create-title-count">0</span>/200</p>
+            </div>
+
+            <div class="field field--bare">
+              <label class="visually-hidden" for="create-content">Story</label>
+              <textarea id="create-content" class="composer-body" placeholder="Write it out&hellip;" rows="14"
+                required></textarea>
+            </div>
+
+            <div class="composer-row">
+              <div class="vis-toggle">
+                <span class="label-mono">Visibility</span>
+                <label class="switch">
+                  <input type="checkbox" id="create-visibility" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span class="switch-value" id="visibility-value">Public</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ---------- IMAGE PLATES: drag & drop, multiple ---------- -->
+            <section class="plate-board" aria-labelledby="create-plates-head">
+              <div class="board-head">
+                <h2 class="board-title" id="create-plates-head">Images</h2>
+                <p class="label-mono board-count" id="create-image-count">None yet</p>
+              </div>
+
+              <div class="dropzone" id="create-dropzone" role="button" tabindex="0"
+                aria-describedby="create-dropzone-hint">
+                <span class="dropzone-frame" aria-hidden="true"></span>
+                <svg class="dropzone-glyph" width="38" height="38" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+                  aria-hidden="true">
+                  <rect x="2.5" y="4.5" width="19" height="15" />
+                  <circle cx="8" cy="10" r="1.6" />
+                  <path d="M21.5 16.5 15 10l-8 9.5" />
+                </svg>
+                <p class="dropzone-title plate" data-plate="Drop images here">Drop images here</p>
+                <p class="dropzone-sub" id="create-dropzone-hint">
+                  or <span class="link-ink">choose files</span> &middot; as many as you like &middot; up to 10&nbsp;MB each
+                </p>
+                <input type="file" id="create-image-input" class="visually-hidden" multiple accept="image/*" />
+              </div>
+
+              <ul class="plate-grid" id="create-image-grid"></ul>
+              <p class="board-foot label-mono" id="create-reorder-hint" hidden>
+                Drag tiles to reorder &middot; the first tile prints as the cover
+              </p>
+            </section>
+
+            <div class="composer-actions">
+              <button type="submit" class="btn btn-ink btn-lg" id="publish-btn">
+                <span class="btn-text">Publish</span><span class="btn-spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </form>
+
+          <aside class="proof" aria-label="Live proof">
+            <div class="proof-head">
+              <span class="label-mono">Proof</span>
+              <span class="proof-stamp" aria-hidden="true">Not printed</span>
+            </div>
+            <div class="proof-body" id="preview-body">
+              <p class="proof-blank">Type a title to pull a proof.</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- =============================== EDIT ============================== -->
+    <section id="page-edit" class="page">
+      <div class="sheet">
+        <div class="desk-head">
+          <p class="eyebrow">Revise</p>
+          <h1 class="desk-title plate" data-plate="Reset the page">Reset the page</h1>
+        </div>
+
+        <div class="desk-layout">
+          <form id="edit-form" class="composer" novalidate>
+            <div class="field field--bare">
+              <label class="visually-hidden" for="edit-title">Title</label>
+              <input type="text" id="edit-title" class="composer-title" placeholder="Title" maxlength="200" required />
+            </div>
+
+            <div class="field field--bare">
+              <label class="visually-hidden" for="edit-content">Story</label>
+              <textarea id="edit-content" class="composer-body" placeholder="Write it out&hellip;" rows="14"
+                required></textarea>
+            </div>
+
+            <div class="composer-row">
+              <div class="vis-toggle">
+                <span class="label-mono">Visibility</span>
+                <label class="switch">
+                  <input type="checkbox" id="edit-visibility" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span class="switch-value" id="edit-visibility-value">Public</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ---------- IMAGE PLATES: live, uploads immediately ---------- -->
+            <section class="plate-board" aria-labelledby="edit-plates-head">
+              <div class="board-head">
+                <h2 class="board-title" id="edit-plates-head">Images</h2>
+                <p class="label-mono board-count" id="edit-image-count">None yet</p>
+              </div>
+
+              <div class="dropzone" id="edit-dropzone" role="button" tabindex="0" aria-describedby="edit-dropzone-hint">
+                <span class="dropzone-frame" aria-hidden="true"></span>
+                <svg class="dropzone-glyph" width="38" height="38" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+                  aria-hidden="true">
+                  <rect x="2.5" y="4.5" width="19" height="15" />
+                  <circle cx="8" cy="10" r="1.6" />
+                  <path d="M21.5 16.5 15 10l-8 9.5" />
+                </svg>
+                <p class="dropzone-title plate" data-plate="Drop images here">Drop images here</p>
+                <p class="dropzone-sub" id="edit-dropzone-hint">
+                  or <span class="link-ink">choose files</span> &middot; these upload the moment you drop them
+                </p>
+                <input type="file" id="edit-image-input" class="visually-hidden" multiple accept="image/*" />
+              </div>
+
+              <ul class="plate-grid" id="edit-image-grid"></ul>
+            </section>
+
+            <div class="composer-actions">
+              <a class="btn btn-quiet btn-lg" id="edit-cancel" href="#/">Cancel</a>
+              <button type="submit" class="btn btn-ink btn-lg" id="update-btn">
+                <span class="btn-text">Save changes</span><span class="btn-spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </form>
+
+          <aside class="proof" aria-label="Live proof">
+            <div class="proof-head">
+              <span class="label-mono">Proof</span>
+              <span class="proof-stamp" aria-hidden="true">Revision</span>
+            </div>
+            <div class="proof-body" id="edit-preview-body">
+              <p class="proof-blank">Loading&hellip;</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= YOUR DESK =========================== -->
+    <section id="page-profile" class="page">
+      <div class="sheet">
+        <div class="colophon">
+          <div class="colophon-avatar">
+            <img id="profile-avatar" src="" alt="" />
+          </div>
+          <div class="colophon-meta">
+            <p class="eyebrow" id="profile-joined"></p>
+            <h1 class="colophon-name plate" id="profile-username" data-plate=""></h1>
+            <p class="colophon-mail label-mono" id="profile-email"></p>
+            <p class="colophon-bio" id="profile-bio"></p>
+          </div>
+          <button class="btn btn-quiet btn-sm" id="edit-profile-toggle">Edit details</button>
+        </div>
+
+        <!-- ---------- EDIT DETAILS: avatar drag & drop ---------- -->
+        <div class="details-panel" id="profile-edit" hidden>
+          <form id="profile-edit-form" class="details-form">
+            <div class="details-grid">
+              <div class="avatar-field">
+                <span class="label-mono" id="avatar-drop-label">Photo</span>
+                <div class="avatar-drop" id="avatar-drop" role="button" tabindex="0"
+                  aria-labelledby="avatar-drop-label" aria-describedby="avatar-drop-hint">
+                  <img id="avatar-drop-img" class="avatar-drop-img" src="" alt="" />
+                  <span class="avatar-drop-ring" aria-hidden="true"></span>
+                  <span class="avatar-drop-veil" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M4 8.5h3l1.6-2.4h6.8L17 8.5h3v11H4z" />
+                      <circle cx="12" cy="13.6" r="3.4" />
+                    </svg>
+                    <span>Drop</span>
+                  </span>
+                  <input type="file" id="avatar-input" class="visually-hidden" accept="image/*" />
+                </div>
+                <p class="field-hint" id="avatar-drop-hint">Drop an image, paste from the clipboard, or press Enter to
+                  choose a file. Squared and resized in your browser.</p>
+                <button type="button" class="text-btn" id="avatar-clear" hidden>Remove photo</button>
+              </div>
+
+              <div class="details-fields">
+                <div class="field">
+                  <input type="text" id="edit-username" placeholder=" " autocomplete="username" />
+                  <label for="edit-username">Username</label>
+                </div>
+                <div class="field field--area">
+                  <textarea id="edit-bio" rows="4" placeholder=" "></textarea>
+                  <label for="edit-bio">Bio</label>
+                </div>
+              </div>
+            </div>
+
+            <div class="details-actions">
+              <button type="button" class="btn btn-quiet btn-sm" id="cancel-edit-profile">Cancel</button>
+              <button type="submit" class="btn btn-ink btn-sm" id="save-profile-btn">
+                <span class="btn-text">Save changes</span><span class="btn-spinner" aria-hidden="true"></span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div class="ink-switch ink-switch--wide" id="profile-tabs" role="tablist" aria-label="Your stories">
+          <span class="ink-switch-slider" aria-hidden="true"></span>
+          <button class="ink-switch-btn is-on" data-tab="my-blogs" role="tab" aria-selected="true">Published</button>
+          <button class="ink-switch-btn" data-tab="starred-blogs" role="tab" aria-selected="false">Starred</button>
+        </div>
+
+        <div id="tab-my-blogs">
+          <div class="story-grid" id="my-blogs-grid"></div>
+          <div class="blank-state" id="my-blogs-empty" hidden>
+            <p class="blank-mark" aria-hidden="true">&#9633;</p>
+            <h3>Your desk is clear</h3>
+            <p>Write something and it lands here.</p>
+            <a href="#/create" class="btn btn-ink btn-sm">Write a story</a>
+          </div>
+        </div>
+
+        <div id="tab-starred-blogs" hidden>
+          <div class="story-grid" id="starred-blogs-grid"></div>
+          <div class="blank-state" id="starred-blogs-empty" hidden>
+            <p class="blank-mark" aria-hidden="true">&#9734;</p>
+            <h3>Nothing starred</h3>
+            <p>Star a story from the feed and it is kept here.</p>
+            <a href="#/" class="btn btn-ink btn-sm">Browse the feed</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="colophon-bar">
+    <div class="sheet colophon-bar-inner">
+      <span class="label-mono">Luminova</span>
+      <span class="label-mono">Set in Archivo, Newsreader &amp; DM&nbsp;Mono</span>
+    </div>
+  </footer>
+
+  <!-- ============================ CONFIRM ============================== -->
+  <div class="overlay" id="confirm-modal" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+      <p class="eyebrow">Confirm</p>
+      <h3 id="confirm-modal-title" class="dialog-title">Pull this story?</h3>
+      <p id="confirm-modal-message" class="dialog-body">Deleting a story also deletes its images. This cannot be undone.
+      </p>
+      <div class="dialog-actions">
+        <button class="btn btn-quiet btn-sm" id="confirm-cancel">Keep it</button>
+        <button class="btn btn-alarm btn-sm" id="confirm-ok">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================ LIGHTBOX ============================= -->
+  <div class="overlay overlay--dark" id="lightbox" hidden>
+    <button class="lightbox-close" id="lightbox-close" aria-label="Close image">&times;</button>
+    <button class="lightbox-step lightbox-step--prev" id="lightbox-prev" aria-label="Previous image">&#8249;</button>
+    <figure class="lightbox-figure">
+      <img id="lightbox-img" src="" alt="" />
+      <figcaption class="label-mono" id="lightbox-caption"></figcaption>
+    </figure>
+    <button class="lightbox-step lightbox-step--next" id="lightbox-next" aria-label="Next image">&#8250;</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

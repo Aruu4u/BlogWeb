@@ -1,0 +1,14 @@
+The route handles:
+
+HTTP
+dependencies
+authentication
+request parameters
+response schema
+
+response_model=schemas.UserResponse ->
+    repose_model se sirf utni hi cheez user ko dikha sakte hai jitna ham chahe 
+    kiuki ho sakta hai return wala function bhot sari fields retunr kar raha ho 
+    sensitive or faltu cheeze bhi ho
+    Or agar object bhi return ho raha hai toh usko bhi handle kar leta hai
+    OR type validation bhi karta hai age(str) -> age(int)
