@@ -13,10 +13,6 @@
     },
     {
       "handle": "filesystem"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/public/index.html"
     }
   ]
 }
