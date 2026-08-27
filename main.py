@@ -15,6 +15,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app=FastAPI()
 
+
+
+@app.get("/test")
+def test():
+    return {"status": "FastAPI is working"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
