@@ -13,9 +13,12 @@ from routes.users import router as users
 
 from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
-@app.get("/test")
+
+
+@app.get("/api/test")
 def test():
     return {"status": "FastAPI is working"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,10 +30,9 @@ app.add_middleware(
 models.Base.metadata.create_all(bind=engine)
 
 
-app.include_router(users)
-app.include_router(auth)
-app.include_router(blogs)
-app.include_router(search)
-app.include_router(stars)
-app.include_router(images)
-
+app.include_router(users, prefix="/api")
+app.include_router(auth, prefix="/api")
+app.include_router(blogs, prefix="/api")
+app.include_router(search, prefix="/api")
+app.include_router(stars, prefix="/api")
+app.include_router(images, prefix="/api")
