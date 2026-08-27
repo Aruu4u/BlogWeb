@@ -1,15 +1,39 @@
-from main import app
+from fastapi import FastAPI
+import models
 
-async def handler(scope, receive, send):
-    if scope["type"] == "http":
-        path = scope.get("path", "")
+from database import engine
 
-        if path.startswith("/api"):
-            scope = dict(scope)
-            scope["path"] = path[4:] or "/"
+from routes.auth import router as auth
+from routes.blogs import router as blogs
+from routes.stars import router as stars
+from routes.search import router as search
+from routes.images import router as images
+from routes.users import router as users
 
-            raw_path = scope.get("raw_path", b"")
-            if raw_path.startswith(b"/api"):
-                scope["raw_path"] = raw_path[4:] or b"/"
+from fastapi.middleware.cors import CORSMiddleware
 
-    await app(scope, receive, send)
+
+app = FastAPI()
+
+
+@app.get("/api/test")
+def test():
+    return {"status": "FastAPI is working"}
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+models.Base.metadata.create_all(bind=engine)
+
+app.include_router(users, prefix="/api")
+app.include_router(auth, prefix="/api")
+app.include_router(blogs, prefix="/api")
+app.include_router(search, prefix="/api")
+app.include_router(stars, prefix="/api")
+app.include_router(images, prefix="/api")
