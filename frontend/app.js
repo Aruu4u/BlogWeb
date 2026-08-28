@@ -1,2117 +1,1670 @@
-/* =====================================================================
-   Luminova — app.js
-   Vanilla SPA, hash routing, no build step. Loaded as a classic script
-   on purpose: API_BASE below falls back to 127.0.0.1 so index.html still
-   works opened straight off disk, which ES modules would break.
-   ===================================================================== */
-
-/* ---------------------------------------------------------------- config */
+/* ==========================================================================
+   LUMINOVA V2 — APPLICATION LOGIC
+   ========================================================================== */
 
 const defaultHost =
-  window.location.hostname &&
-  window.location.hostname !== "file:" &&
-  window.location.hostname !== ""
-    ? window.location.hostname
-    : "127.0.0.1";
+  window.location.hostname && window.location.hostname !== "file:" && window.location.hostname !== ""
+    ? window.location.hostname : "127.0.0.1";
 
-const API_BASE = localStorage.getItem("blogs_api_base") || `http://${defaultHost}:8000`;
+const API_BASE = localStorage.getItem("blogs_api_base") || "";
 const TOKEN_KEY = "blogs_access_token";
 
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const AVATAR_PX = 160;
-const PER_PAGE = 9;
-
-/* ----------------------------------------------------------------- state */
-
 const state = {
-  token: localStorage.getItem(TOKEN_KEY) || null,
+  token: localStorage.getItem(TOKEN_KEY),
   user: null,
-  page: 1,
-  limit: PER_PAGE,
-  search: "",
-  sort: "newest",
-  feed: { blogs: [], total: 0, page: 1, limit: PER_PAGE },
+  blogs: [],
   currentBlog: null,
-  editBlog: null,
-  profileTab: "my-blogs",
-  ownBlogs: [],
-  starredBlogs: [],
-  gallery: [],
-  galleryIndex: 0,
-  createBay: null,
-  editBay: null,
+  page: 1,
+  limit: 9,
+  total: 0,
+  sort: "newest",
+  search: "",
+  editingBlog: null,
+  pendingAvatarDataUrl: null,
+  pendingFiles: [],   // [{ id, file, preview }] queued for upload on publish
 };
-
-/* ------------------------------------------------------------- utilities */
-
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-function el(tag, className) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  return node;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value).replace(/`/g, "&#96;");
-}
-
-function debounce(fn, wait) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), wait);
-  };
-}
-
-function prefersReduced() {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
-function setLoading(button, loading) {
-  if (!button) return;
-  button.classList.toggle("is-loading", loading);
-  button.disabled = loading;
-}
-
-function formatDate(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  }).format(date);
-}
-
-function readTime(text) {
-  const words = String(text || "").trim().split(/\s+/).filter(Boolean).length;
-  return Math.max(1, Math.round(words / 220));
-}
-
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-
-function plural(n, one, many) {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
-/* Supabase's get_public_url sometimes returns a bare trailing "?" */
-function fixImageUrl(url) {
-  return url ? String(url).replace(/\?$/, "") : "";
-}
-
-function sortImages(images) {
-  return [...(images || [])].sort(
-    (a, b) => (a.display_order ?? 0) - (b.display_order ?? 0) || (a.id ?? 0) - (b.id ?? 0)
-  );
-}
-
-/* BlogResponse carries no thumbnail field, so the cover is simply the image
-   with the lowest display_order — not whatever happens to be first. */
-function primaryImage(blog) {
-  const first = sortImages(blog?.images)[0];
-  return first ? fixImageUrl(first.image_url) : "";
-}
-
-function avatarFor(user) {
-  if (user?.profile_image) return fixImageUrl(user.profile_image);
-  const initial = (user?.username || user?.email || "?").trim().charAt(0).toUpperCase() || "?";
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">` +
-    `<rect width="120" height="120" fill="#E4DFD2"/>` +
-    `<text x="60" y="84" text-anchor="middle" font-family="Archivo, Helvetica, sans-serif"` +
-    ` font-size="64" font-weight="900" fill="#12121A">${escapeHtml(initial)}</text>` +
-    `</svg>`;
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
-}
-
-/* ------------------------------------------------------------------- api */
-
-async function api(path, options = {}) {
-  const { method = "GET", body, auth = true, form = false } = options;
-  const headers = {};
-
-  if (auth && state.token) headers.Authorization = `Bearer ${state.token}`;
-  if (!form && body !== undefined) headers["Content-Type"] = "application/json";
-
-  let response;
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      method,
-      headers,
-      body: form ? body : body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch {
-    throw new Error(`Cannot reach the API at ${API_BASE}. Start the server and try again.`);
-  }
-
-  if (response.status === 401 && auth && state.token) {
-    clearSession();
-    throw new Error("Your session expired. Log in again.");
-  }
-
-  const text = await response.text();
-  let payload = null;
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = text;
-    }
-  }
-
-  if (!response.ok) {
-    let detail = payload?.detail ?? payload ?? response.statusText;
-    if (Array.isArray(detail)) detail = detail.map((item) => item.msg || item).join(", ");
-    if (typeof detail !== "string") detail = JSON.stringify(detail);
-    throw new Error(detail || `Request failed (${response.status})`);
-  }
-
-  return payload;
-}
-
-/* ---------------------------------------------------------------- toasts */
-
-function toast(message, kind = "", ms = 4200) {
-  const stack = $("#toast-container");
-  if (!stack) return;
-  const node = el("div", `toast ${kind}`.trim());
-  node.textContent = message;
-  stack.appendChild(node);
-  setTimeout(() => {
-    node.classList.add("is-leaving");
-    setTimeout(() => node.remove(), 500);
-  }, ms);
-}
-
-/* --------------------------------------------------------- confirm dialog */
-
-let confirmResolve = null;
-let confirmReturnFocus = null;
-
-function confirmAction({ title, message, okLabel = "Delete", cancelLabel = "Keep it" }) {
-  const overlay = $("#confirm-modal");
-  $("#confirm-modal-title").textContent = title;
-  $("#confirm-modal-message").textContent = message;
-  $("#confirm-ok").textContent = okLabel;
-  $("#confirm-cancel").textContent = cancelLabel;
-
-  confirmReturnFocus = document.activeElement;
-  overlay.hidden = false;
-  requestAnimationFrame(() => $("#confirm-cancel").focus());
-
-  return new Promise((resolve) => {
-    confirmResolve = resolve;
-  });
-}
-
-function closeConfirm(result) {
-  const overlay = $("#confirm-modal");
-  if (overlay.hidden) return;
-  overlay.hidden = true;
-  const resolve = confirmResolve;
-  confirmResolve = null;
-  if (confirmReturnFocus?.focus) confirmReturnFocus.focus();
-  if (resolve) resolve(result);
-}
-
-function trapFocus(container, event) {
-  const focusable = $$(
-    'a[href], button:not([disabled]), input:not([disabled]), textarea, [tabindex]:not([tabindex="-1"])',
-    container
-  ).filter((node) => node.offsetParent !== null);
-  if (!focusable.length) return;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
-}
-
-/* -------------------------------------------------------------- lightbox */
-
-let lightboxReturnFocus = null;
-
-function openLightbox(urls, index) {
-  if (!urls.length) return;
-  state.gallery = urls;
-  state.galleryIndex = Math.min(Math.max(index, 0), urls.length - 1);
-  lightboxReturnFocus = document.activeElement;
-  $("#lightbox").hidden = false;
-  paintLightbox();
-  $("#lightbox-close").focus();
-}
-
-function paintLightbox() {
-  const total = state.gallery.length;
-  const index = state.galleryIndex;
-  $("#lightbox-img").src = state.gallery[index] || "";
-  $("#lightbox-img").alt = `Image ${index + 1} of ${total}`;
-  $("#lightbox-caption").textContent = `${pad2(index + 1)} / ${pad2(total)}`;
-  $("#lightbox-prev").hidden = total < 2;
-  $("#lightbox-next").hidden = total < 2;
-}
-
-function stepLightbox(delta) {
-  const total = state.gallery.length;
-  if (!total) return;
-  state.galleryIndex = (state.galleryIndex + delta + total) % total;
-  paintLightbox();
-}
-
-function closeLightbox() {
-  if ($("#lightbox").hidden) return;
-  $("#lightbox").hidden = true;
-  $("#lightbox-img").src = "";
-  if (lightboxReturnFocus?.focus) lightboxReturnFocus.focus();
-}
-
-/* ------------------------------------------------------------------ auth */
-
-function parseJwt(token) {
-  try {
-    const base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    const raw = atob(base64);
-    const utf8 = decodeURIComponent(
-      raw
-        .split("")
-        .map((c) => `%${`00${c.charCodeAt(0).toString(16)}`.slice(-2)}`)
-        .join("")
-    );
-    return JSON.parse(utf8);
-  } catch {
-    return null;
-  }
-}
-
-function isAuthed() {
-  return Boolean(state.token);
-}
-
-function clearSession() {
-  state.token = null;
-  state.user = null;
-  state.ownBlogs = [];
-  state.starredBlogs = [];
-  localStorage.removeItem(TOKEN_KEY);
-  document.body.classList.remove("is-authenticated");
-  paintAccount();
-}
-
-function requireAuth(message) {
-  if (isAuthed()) return true;
-  toast(message, "error");
-  location.hash = "#/login";
-  return false;
-}
-
-/* The signed-in user comes from the JWT (user_id, user_email) plus
-   GET /users/{id} for username, bio, photo and join date. Reading it off a
-   blog's owner would lose email and bio — BlogOwner has neither — and would
-   give nothing at all to someone who has not published yet. */
-async function hydrateAuth() {
-  if (!state.token) {
-    document.body.classList.remove("is-authenticated");
-    paintAccount();
-    return;
-  }
-
-  const claims = parseJwt(state.token);
-  if (!claims?.user_id) {
-    clearSession();
-    return;
-  }
-  if (claims.exp && claims.exp * 1000 < Date.now()) {
-    clearSession();
-    toast("Your session expired. Log in again.", "error");
-    return;
-  }
-
-  document.body.classList.add("is-authenticated");
-  state.user = {
-    id: claims.user_id,
-    email: claims.user_email || "",
-    username: (claims.user_email || "reader").split("@")[0],
-    bio: null,
-    profile_image: null,
-    created_at: null,
-  };
-  paintAccount();
-
-  try {
-    const full = await api(`/users/${claims.user_id}`);
-    state.user = { ...state.user, ...full, email: full.email || state.user.email };
-    paintAccount();
-  } catch {
-    /* keep the JWT-derived stub — the account menu still works */
-  }
-}
-
-function paintAccount() {
-  const name = $("#nav-username");
-  const image = $("#nav-avatar");
-  if (name) name.textContent = state.user?.username || "";
-  if (image) {
-    image.src = avatarFor(state.user);
-    image.alt = state.user?.username ? `${state.user.username}, your account` : "";
-  }
-}
-
-/* ---------------------------------------------------------------- router */
-
-const ROUTES = ["feed", "blog", "login", "signup", "create", "edit", "profile"];
-
-function showPage(name) {
-  const swap = () => {
-    ROUTES.forEach((route_) =>
-      document.getElementById(`page-${route_}`)?.classList.remove("active")
-    );
-    document.getElementById(`page-${name}`)?.classList.add("active");
-    $$(".nav-link, .tray-link").forEach((link) =>
-      link.classList.toggle("active", link.dataset.nav === name)
-    );
-    window.scrollTo(0, 0);
-    $$(".ink-switch").forEach(positionSwitch);
-  };
-
-  if (document.startViewTransition && !prefersReduced()) {
-    document.startViewTransition(swap);
-  } else {
-    swap();
-  }
-}
-
-function route() {
-  closeTray();
-  closeMenu();
-  closeLightbox();
-
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  const head = parts[0] || "";
-
-  if (head === "blog" && parts[1]) {
-    showPage("blog");
-    renderBlogDetail(parts[1]);
-    return;
-  }
-  if (head === "edit" && parts[1]) {
-    if (!requireAuth("Log in to edit a story.")) return;
-    showPage("edit");
-    renderEditPage(parts[1]);
-    return;
-  }
-  if (head === "create") {
-    if (!requireAuth("Log in to publish a story.")) return;
-    showPage("create");
-    renderProof();
-    return;
-  }
-  if (head === "profile") {
-    if (!requireAuth("Log in to see your desk.")) return;
-    showPage("profile");
-    renderProfile();
-    return;
-  }
-  if (head === "login" || head === "signup") {
-    if (isAuthed()) {
-      location.hash = "#/";
-      return;
-    }
-    showPage(head);
-    return;
-  }
-
-  showPage("feed");
-  loadFeed();
-}
-
-/* --------------------------------------------------------- scroll reveal */
 
 let revealObserver = null;
 
-function observeReveals(root) {
-  const targets = $$(".reveal:not(.is-revealed)", root);
-  if (prefersReduced()) {
-    targets.forEach((node) => node.classList.add("is-revealed"));
-    return;
-  }
-  if (!revealObserver) {
-    revealObserver = new IntersectionObserver(
-      (entries, observer) => {
-        entries.forEach((entry) => {
-          if (!entry.isIntersecting) return;
-          const delay = Number(entry.target.dataset.revealDelay || 0);
-          setTimeout(() => entry.target.classList.add("is-revealed"), delay);
-          observer.unobserve(entry.target);
-        });
-      },
-      { rootMargin: "0px 0px -6% 0px", threshold: 0.04 }
-    );
-  }
-  targets.forEach((node) => revealObserver.observe(node));
-}
+/* ═══════════════════════════════════════════════
+   CACHE — stale-while-revalidate
+   Renders cached data instantly when navigating back to a page,
+   then quietly refreshes in the background.
+═══════════════════════════════════════════════ */
 
-/* ------------------------------------------------------------ ink switch */
+const CACHE_TTL = 60 * 1000; // treat entries as fresh for 60s
+const cache = new Map();     // key -> { data, at }
 
-function positionSwitch(container) {
-  const slider = $(".ink-switch-slider", container);
-  const active = $(".ink-switch-btn.is-on", container);
-  if (!slider || !active || !active.offsetWidth) return;
-  slider.style.setProperty("--sw-w", `${active.offsetWidth}px`);
-  slider.style.setProperty("--sw-x", `${active.offsetLeft}px`);
-}
+const cacheGet = (key) => {
+  const hit = cache.get(key);
+  if (!hit) return null;
+  return { data: hit.data, stale: Date.now() - hit.at > CACHE_TTL };
+};
 
-function selectSwitch(container, button) {
-  $$(".ink-switch-btn", container).forEach((node) => {
-    const on = node === button;
-    node.classList.toggle("is-on", on);
-    node.setAttribute("aria-selected", String(on));
-  });
-  positionSwitch(container);
-}
+const cacheSet = (key, data) => cache.set(key, { data, at: Date.now() });
 
-/* ------------------------------------------------------------------ feed */
-
-async function loadFeed() {
-  const grid = $("#blog-grid");
-  const skeleton = $("#feed-skeleton");
-
-  $("#feed-empty").hidden = true;
-  grid.innerHTML = "";
-  skeleton.innerHTML = Array.from({ length: 6 })
-    .map(
-      () =>
-        `<div class="sk-card">` +
-        `<span class="sk sk-block"></span>` +
-        `<span class="sk sk-line" style="width:88%;height:22px"></span>` +
-        `<span class="sk sk-line" style="width:96%"></span>` +
-        `<span class="sk sk-line" style="width:64%"></span>` +
-        `</div>`
-    )
-    .join("");
-  skeleton.style.display = "";
-
-  const params = new URLSearchParams({
-    page: String(state.page),
-    limit: String(state.limit),
-    sort: state.sort,
-  });
-  if (state.search) params.set("search", state.search);
-
-  try {
-    const data = await api(`/blogs?${params}`, { auth: isAuthed() });
-    state.feed = data;
-    skeleton.style.display = "none";
-    skeleton.innerHTML = "";
-    renderFeed(data);
-  } catch (error) {
-    skeleton.style.display = "none";
-    skeleton.innerHTML = "";
-    grid.innerHTML = "";
-    $("#pagination").innerHTML = "";
-    $("#feed-result-count").textContent = "";
-    $("#feed-empty").hidden = false;
-    toast(error.message, "error");
+/* Drop cache entries whose key contains any of the given fragments */
+function cacheInvalidate(...fragments) {
+  if (!fragments.length) { cache.clear(); return; }
+  for (const key of Array.from(cache.keys())) {
+    if (fragments.some((f) => key.includes(f))) cache.delete(key);
   }
 }
 
-function renderFeed(data) {
-  const grid = $("#blog-grid");
-  const blogs = data.blogs || [];
-  const total = data.total || 0;
+const feedCacheKey = () =>
+  `feed:${state.page}:${state.limit}:${state.sort}:${state.search}`;
 
-  $("#feed-result-count").textContent = state.search
-    ? `${plural(total, "story", "stories")} matching "${state.search}"`
-    : `${plural(total, "story", "stories")} in print`;
-  $("#hero-eyebrow").textContent = `Independent press · ${plural(total, "story", "stories")}`;
-
-  if (!blogs.length) {
-    grid.innerHTML = "";
-    $("#feed-empty").hidden = false;
-    renderPagination(total);
-    return;
+/* Fetch through the cache.
+   onData may be called twice: once with cached data, once with fresh. */
+async function cachedFetch(key, fetcher, onData) {
+  const hit = cacheGet(key);
+  if (hit) {
+    onData(hit.data, { fromCache: true });
+    if (!hit.stale) return hit.data;   // fresh enough, no network call
+    try {
+      const fresh = await fetcher();   // stale: revalidate quietly
+      cacheSet(key, fresh);
+      onData(fresh, { fromCache: false, revalidated: true });
+      return fresh;
+    } catch {
+      return hit.data;                 // keep showing cached data on failure
+    }
   }
-
-  $("#feed-empty").hidden = true;
-  const offset = ((data.page || 1) - 1) * (data.limit || state.limit);
-  grid.innerHTML = blogs.map((blog, i) => storyCard(blog, offset + i + 1, i)).join("");
-  renderPagination(total);
-  observeReveals(grid);
+  const data = await fetcher();
+  cacheSet(key, data);
+  onData(data, { fromCache: false });
+  return data;
 }
 
-function storyCard(blog, position, indexInBatch = 0) {
-  const cover = primaryImage(blog);
-  const owner = blog.owner || {};
-  const imageCount = (blog.images || []).length;
-  const mine = state.user && owner.id === state.user.id;
+/* ═══════════════════════════════════════════════
+   SKELETONS
+═══════════════════════════════════════════════ */
 
-  const flags = [];
-  if (blog.visibility === false) flags.push('<span class="flag flag--private">Private</span>');
-  if (imageCount > 1)
-    flags.push(`<span class="flag flag--plates">${plural(imageCount, "image", "images")}</span>`);
+const SKELETON_WIDTHS = [
+  ["w90", "w70"], ["w80", "w60"], ["w70", "w90"],
+  ["w90", "w60"], ["w60", "w80"], ["w80", "w70"],
+];
 
+function skeletonCard(i) {
+  const [a, b] = SKELETON_WIDTHS[i % SKELETON_WIDTHS.length];
   return `
-  <article class="story-card reveal" data-card="${blog.id}" data-reveal-delay="${
-    indexInBatch * 70
-  }">
-    <span class="card-index" aria-hidden="true">&#8470;&nbsp;${pad2(position)}</span>
-    <a class="card-link" href="#/blog/${blog.id}">
-      <span class="card-thumb${cover ? "" : " card-thumb--blank"}">
-        ${
-          cover
-            ? `<img src="${escapeAttr(cover)}" alt="" loading="lazy" />`
-            : `<span aria-hidden="true">${escapeHtml(
-                (blog.title || "?").trim().charAt(0).toUpperCase()
-              )}</span>`
-        }
-      </span>
-      ${flags.length ? `<span class="card-flags">${flags.join("")}</span>` : ""}
-      <h2 class="card-title"><span class="plate" data-plate="${escapeAttr(
-        blog.title
-      )}">${escapeHtml(blog.title)}</span></h2>
-      <p class="card-excerpt">${escapeHtml(blog.content || "")}</p>
-    </a>
-    <div class="card-foot">
-      <span class="byline">
-        <img class="byline-avatar" src="${escapeAttr(avatarFor(owner))}" alt="" loading="lazy" />
-        <span class="byline-text">
-          <span class="byline-name">${escapeHtml(owner.username || "unknown")}</span>
-          <span class="byline-date">${formatDate(blog.created_at)} &middot; ${readTime(
-    blog.content
-  )} min</span>
-        </span>
-      </span>
-      <span class="card-tools">
-        ${
-          mine
-            ? `<a class="icon-btn" href="#/edit/${blog.id}" aria-label="Edit ${escapeAttr(
-                blog.title
-              )}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/></svg></a>`
-            : ""
-        }
-        ${starButton(blog)}
-      </span>
-    </div>
-  </article>`;
+    <article class="blog-card skeleton-card" aria-hidden="true">
+      <div class="skeleton-thumb"></div>
+      <div class="skeleton-body">
+        <div class="skeleton-line title ${a}"></div>
+        <div class="skeleton-line w100"></div>
+        <div class="skeleton-line ${b}"></div>
+        <div class="skeleton-meta">
+          <div class="skeleton-circle"></div>
+          <div class="skeleton-line w40" style="margin-bottom:0;"></div>
+        </div>
+      </div>
+    </article>`;
 }
 
-function starButton(blog, extraClass = "") {
-  const classes = ["star-btn", blog.is_starred ? "is-on" : "", extraClass]
-    .filter(Boolean)
-    .join(" ");
-  return `<button class="${classes}"
-    data-star="${blog.id}" aria-pressed="${Boolean(blog.is_starred)}"
-    aria-label="${blog.is_starred ? "Remove star from" : "Star"} ${escapeAttr(blog.title)}">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="${
-      blog.is_starred ? "currentColor" : "none"
-    }" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.9 5.9 6.6.9-4.8 4.6 1.2 6.5L12 17.8 6.1 20.9l1.2-6.5L2.5 9.8l6.6-.9L12 3z"/></svg>
-    <span data-star-count="${blog.id}">${blog.star_count ?? 0}</span>
-  </button>`;
+/* Fill a grid with placeholder cards that match the real card layout */
+function showSkeletons(root, count = 6) {
+  if (!root) return;
+  root.setAttribute("aria-busy", "true");
+  root.innerHTML = Array.from({ length: count }, (_, i) => skeletonCard(i)).join("");
 }
 
-function renderPagination(total) {
-  const nav = $("#pagination");
-  const limit = state.limit || PER_PAGE;
-  const pages = Math.max(1, Math.ceil(total / limit));
+function clearBusy(root) {
+  root?.removeAttribute("aria-busy");
+}
 
-  if (pages < 2) {
-    nav.innerHTML = "";
-    return;
-  }
+const $  = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  const current = Math.min(state.page, pages);
-  const shown = new Set([1, pages, current, current - 1, current + 1]);
-  if (current <= 2) shown.add(3);
-  if (current >= pages - 1) shown.add(pages - 2);
+const pages = {
+  feed: null, blog: null, login: null, signup: null,
+  create: null, edit: null, profile: null, starred: null,
+};
 
-  const list = [...shown].filter((p) => p >= 1 && p <= pages).sort((a, b) => a - b);
+/* ═══════════════════════════════════════════════
+   BOOT
+═══════════════════════════════════════════════ */
 
-  let html = `<button class="page-btn" data-page="${current - 1}"${
-    current === 1 ? " disabled" : ""
-  } aria-label="Previous page">&#8249;</button>`;
+document.addEventListener("DOMContentLoaded", () => {
+  pages.feed    = $("#page-feed");
+  pages.blog    = $("#page-blog");
+  pages.login   = $("#page-login");
+  pages.signup  = $("#page-signup");
+  pages.create  = $("#page-create");
+  pages.edit    = $("#page-edit");
+  pages.profile = $("#page-profile");
+  pages.starred = $("#page-starred");
 
-  let previous = 0;
-  list.forEach((page) => {
-    if (page - previous > 1) html += `<span class="page-gap" aria-hidden="true">&hellip;</span>`;
-    html += `<button class="page-btn${page === current ? " is-on" : ""}" data-page="${page}"${
-      page === current ? ' aria-current="page"' : ""
-    } aria-label="Page ${page}">${page}</button>`;
-    previous = page;
+  bindGlobalEvents();
+  hydrateAuth();
+  route();
+  initNavbarScroll();
+});
+
+window.addEventListener("hashchange", route);
+
+function initNavbarScroll() {
+  const nav = $("#main-navbar");
+  if (!nav) return;
+  const h = () => nav.classList.toggle("scrolled", window.scrollY > 12);
+  window.addEventListener("scroll", h, { passive: true });
+  h();
+}
+
+/* ═══════════════════════════════════════════════
+   EVENTS
+═══════════════════════════════════════════════ */
+
+function bindGlobalEvents() {
+  // hamburger
+  const hamburger  = $("#hamburger");
+  const mobileMenu = $("#mobile-menu");
+  hamburger?.addEventListener("click", () => {
+    const open = mobileMenu.classList.toggle("open");
+    hamburger.setAttribute("aria-expanded", String(open));
   });
 
-  html += `<button class="page-btn" data-page="${current + 1}"${
-    current === pages ? " disabled" : ""
-  } aria-label="Next page">&#8250;</button>`;
+  // user dropdown
+  const avatarBtn = $("#user-avatar-btn");
+  const dropdown  = $("#user-dropdown");
+  avatarBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = dropdown.classList.toggle("open");
+    avatarBtn.setAttribute("aria-expanded", String(open));
+  });
+  document.addEventListener("click", () => dropdown?.classList.remove("open"));
 
-  nav.innerHTML = html;
-}
+  // auth
+  $("#logout-btn")?.addEventListener("click", logout);
+  $("#mobile-logout-btn")?.addEventListener("click", logout);
 
-/* ------------------------------------------------------------------ stars */
+  // forms
+  $("#login-form")?.addEventListener("submit", onLogin);
+  $("#signup-form")?.addEventListener("submit", onSignup);
+  $("#create-form")?.addEventListener("submit", onCreateBlog);
+  $("#edit-form")?.addEventListener("submit", onUpdateBlog);
+  $("#profile-edit-form")?.addEventListener("submit", onSaveProfile);
+  $("#edit-profile-toggle")?.addEventListener("click", showProfileEditor);
+  $("#cancel-edit-profile")?.addEventListener("click", () => {
+    const el = $("#profile-edit");
+    if (el) el.style.display = "none";
+  });
 
-function applyStar(blog, starred) {
-  blog.is_starred = starred;
-  blog.star_count = Math.max(0, (blog.star_count ?? 0) + (starred ? 1 : -1));
+  // title char counter + preview
+  $("#create-title")?.addEventListener("input", () => {
+    const len = $("#create-title").value.length;
+    const el  = $("#create-title-count");
+    if (el) {
+      el.textContent = len;
+      el.style.color = len > 180 ? "var(--rose)" : len > 140 ? "var(--amber)" : "var(--text-dim)";
+    }
+    updateCreatePreview();
+  });
+  $("#create-content")?.addEventListener("input", updateCreatePreview);
 
-  $$(`[data-star="${blog.id}"]`).forEach((button) => {
-    button.classList.toggle("is-on", starred);
-    button.setAttribute("aria-pressed", String(starred));
-    $("svg", button)?.setAttribute("fill", starred ? "currentColor" : "none");
-    button.setAttribute(
-      "aria-label",
-      `${starred ? "Remove star from" : "Star"} ${blog.title || "this story"}`
-    );
-    if (starred) {
-      button.classList.add("just-starred");
-      setTimeout(() => button.classList.remove("just-starred"), 560);
+  // visibility toggles
+  $("#create-visibility")?.addEventListener("change", (e) => {
+    const vis  = $("#visibility-value");
+    const hint = vis ? vis.nextElementSibling : null;
+    if (vis)  vis.textContent  = e.target.checked ? "Public"  : "Private";
+    if (hint) hint.textContent = e.target.checked ? "— visible to everyone" : "— only you can see this";
+  });
+  $("#edit-visibility")?.addEventListener("change", (e) => {
+    const vis = $("#edit-visibility-value");
+    if (vis) vis.textContent = e.target.checked ? "Public" : "Private";
+  });
+
+  bindCoverDropZone();
+  bindEditImageZone();
+  bindAvatarDrop();
+  bindProfileAvatarUploader();
+
+  // search
+  $("#global-search")?.addEventListener("input", debounce((e) => {
+    state.search = e.target.value.trim();
+    state.page   = 1;
+    loadFeed();
+  }, 320));
+
+  // keyboard shortcuts
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && !["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+      e.preventDefault();
+      $("#global-search")?.focus();
+    }
+    if (e.key === "Escape") {
+      closeLightbox();
+      $("#confirm-modal")?.classList.remove("active");
     }
   });
 
-  $$(`[data-star-count="${blog.id}"]`).forEach((node) => {
-    node.textContent = blog.star_count;
-  });
-}
-
-function findBlogRecords(id) {
-  const numeric = Number(id);
-  const records = [];
-  [state.feed.blogs || [], state.ownBlogs, state.starredBlogs].forEach((pool) =>
-    pool.forEach((blog) => blog.id === numeric && records.push(blog))
-  );
-  if (state.currentBlog?.id === numeric) records.push(state.currentBlog);
-  return records;
-}
-
-async function toggleStar(id) {
-  if (!requireAuth("Log in to star a story.")) return;
-
-  const records = findBlogRecords(id);
-  if (!records.length) return;
-  const next = !records[0].is_starred;
-
-  records.forEach((blog) => applyStar(blog, next));
-
-  try {
-    await api(`/blogs/${id}/star`, { method: next ? "POST" : "DELETE" });
-  } catch (error) {
-    records.forEach((blog) => applyStar(blog, !next));
-    toast(error.message, "error");
-  }
-}
-
-/* ----------------------------------------------------------- blog detail */
-
-async function renderBlogDetail(id) {
-  const skeleton = $("#blog-detail-skeleton");
-  const holder = $("#blog-detail-content");
-  skeleton.style.display = "";
-  holder.hidden = true;
-  holder.innerHTML = "";
-
-  try {
-    const blog = await api(`/blogs/${id}`, { auth: isAuthed() });
-    state.currentBlog = blog;
-    skeleton.style.display = "none";
-    holder.hidden = false;
-    holder.innerHTML = blogDetailMarkup(blog);
-  } catch (error) {
-    state.currentBlog = null;
-    skeleton.style.display = "none";
-    holder.hidden = false;
-    holder.innerHTML = `
-      <div class="blank-state">
-        <p class="blank-mark" aria-hidden="true">&#9633;</p>
-        <h3>Story not available</h3>
-        <p>${escapeHtml(error.message)}</p>
-        <a href="#/" class="btn btn-ink btn-sm">Back to the feed</a>
-      </div>`;
-  }
-}
-
-function blogDetailMarkup(blog) {
-  const owner = blog.owner || {};
-  const mine = state.user && owner.id === state.user.id;
-  const images = sortImages(blog.images).map((image) => fixImageUrl(image.image_url));
-  const lead = images[0] || "";
-  const rest = images.slice(1);
-
-  return `
-    <div class="article-head">
-      <p class="eyebrow">${formatDate(blog.created_at)} &middot; ${readTime(blog.content)} min read${
-    blog.visibility === false ? " &middot; Private" : ""
-  }</p>
-      <h1 class="article-title">${escapeHtml(blog.title)}</h1>
-    </div>
-
-    <div class="article-meta">
-      <img class="byline-avatar" src="${escapeAttr(avatarFor(owner))}" alt="" />
-      <span class="byline-text">
-        <span class="byline-name">${escapeHtml(owner.username || "unknown")}</span>
-        <span class="byline-date">${plural(blog.star_count ?? 0, "star", "stars")}</span>
-      </span>
-      <span class="article-tools">
-        ${starButton(blog)}
-        ${
-          mine
-            ? `<a class="btn btn-quiet btn-sm" href="#/edit/${blog.id}">Edit</a>
-               <button class="btn btn-alarm btn-sm" data-delete-blog="${blog.id}">Delete</button>`
-            : ""
-        }
-      </span>
-    </div>
-
-    ${
-      lead
-        ? `<figure class="article-lead" data-zoom="0" tabindex="0" role="button" aria-label="Open image 1 full size"><img src="${escapeAttr(
-            lead
-          )}" alt="${escapeAttr(blog.title)}" /></figure>`
-        : ""
-    }
-
-    <div class="article-body">${escapeHtml(blog.content || "")}</div>
-
-    ${
-      rest.length
-        ? `<div class="gallery-head">
-             <h2>Images</h2>
-             <span class="label-mono">${plural(images.length, "image", "images")}</span>
-           </div>
-           <div class="gallery">
-             ${rest
-               .map(
-                 (url, i) =>
-                   `<div class="gallery-cell" data-zoom="${i + 1}" tabindex="0" role="button"
-                      aria-label="Open image ${i + 2} full size">
-                      <img src="${escapeAttr(url)}" alt="Image ${i + 2} from ${escapeAttr(
-                     blog.title
-                   )}" loading="lazy" />
-                    </div>`
-               )
-               .join("")}
-           </div>`
-        : ""
-    }
-
-    <div class="article-foot">
-      <a href="#/" class="btn btn-quiet btn-sm">All stories</a>
-      <span class="label-mono">${escapeHtml(owner.username || "")}</span>
-    </div>`;
-}
-
-async function deleteBlog(id) {
-  const ok = await confirmAction({
-    title: "Delete this story?",
-    message: "Its images are deleted from storage too. This cannot be undone.",
-    okLabel: "Delete",
-  });
-  if (!ok) return;
-
-  try {
-    await api(`/blogs/${id}`, { method: "DELETE" });
-    toast("Story deleted.", "success");
-    if ($("#page-profile").classList.contains("active")) {
-      renderProfile();
-    } else if (location.hash === "#/" || location.hash === "") {
+  // sort
+  $$("#sort-toggle .sort-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.sort = btn.dataset.sort;
+      $$("#sort-toggle .sort-btn").forEach((b) => b.classList.toggle("active", b === btn));
+      state.page = 1;
       loadFeed();
-    } else {
-      location.hash = "#/"; /* hashchange -> route() -> loadFeed() */
-    }
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-/* =====================================================================
-   FILE DRAG PLUMBING
-   ===================================================================== */
-
-function dragHasFiles(event) {
-  const types = event.dataTransfer?.types;
-  return types ? Array.from(types).includes("Files") : false;
-}
-
-const armableZones = new Set();
-let windowDragDepth = 0;
-
-function setArmed(on) {
-  document.body.classList.toggle("is-dragging-files", on);
-  armableZones.forEach((node) => node.classList.toggle("is-armed", on));
-}
-
-function disarmAll() {
-  windowDragDepth = 0;
-  setArmed(false);
-  armableZones.forEach((node) => node.classList.remove("is-hot"));
-}
-
-function bindWindowDrag() {
-  window.addEventListener("dragenter", (event) => {
-    if (!dragHasFiles(event)) return;
-    windowDragDepth += 1;
-    setArmed(true);
+    });
   });
 
-  /* Without preventDefault the browser navigates to the dropped file. */
-  window.addEventListener("dragover", (event) => {
-    if (!dragHasFiles(event)) return;
-    event.preventDefault();
+  // profile tabs
+  $$(".profile-tabs .tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setProfileTab(btn.dataset.tab));
   });
 
-  window.addEventListener("dragleave", (event) => {
-    if (!dragHasFiles(event)) return;
-    windowDragDepth = Math.max(0, windowDragDepth - 1);
-    if (!windowDragDepth) setArmed(false);
-  });
-
-  window.addEventListener("drop", (event) => {
-    if (!dragHasFiles(event)) return;
-    event.preventDefault();
-    disarmAll();
-  });
-
-  window.addEventListener("dragend", disarmAll);
-}
-
-/* dragleave fires every time the pointer crosses into a child element, so a
-   naive handler flickers the whole time the file is over the zone. Count the
-   crossings instead. */
-function bindFileDrop(node, onFiles) {
-  let depth = 0;
-
-  node.addEventListener("dragenter", (event) => {
-    if (!dragHasFiles(event)) return;
-    event.preventDefault();
-    depth += 1;
-    node.classList.add("is-hot");
-  });
-
-  node.addEventListener("dragover", (event) => {
-    if (!dragHasFiles(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-    node.classList.add("is-hot");
-  });
-
-  node.addEventListener("dragleave", (event) => {
-    if (!dragHasFiles(event)) return;
-    depth = Math.max(0, depth - 1);
-    if (!depth) node.classList.remove("is-hot");
-  });
-
-  node.addEventListener("drop", (event) => {
-    if (!dragHasFiles(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    depth = 0;
-    disarmAll();
-    const files = Array.from(event.dataTransfer.files || []);
-    if (files.length) onFiles(files);
-  });
-
-  armableZones.add(node);
-}
-
-function bindZoneActivation(zone, input) {
-  zone.addEventListener("click", (event) => {
-    if (event.target === input) return;
-    input.click();
-  });
-  zone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
-      event.preventDefault();
-      input.click();
-    }
+  // lightbox
+  $("#lightbox-close")?.addEventListener("click", closeLightbox);
+  $("#lightbox-modal")?.addEventListener("click", (e) => {
+    if (e.target === $("#lightbox-modal")) closeLightbox();
   });
 }
 
-function screenImageFiles(files, takenKeys) {
-  const accepted = [];
-  const problems = [];
+/* ── Multi-image drop zone (create page) ─────── */
 
-  files.forEach((file) => {
-    if (!file.type.startsWith("image/")) {
-      problems.push(`${file.name} is not an image.`);
-      return;
-    }
-    if (file.size > MAX_IMAGE_BYTES) {
-      problems.push(`${file.name} is over 10 MB.`);
-      return;
-    }
-    const key = `${file.name}:${file.size}`;
-    if (takenKeys.has(key)) {
-      problems.push(`${file.name} is already added.`);
-      return;
-    }
-    takenKeys.add(key);
-    accepted.push(file);
-  });
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // backend/Supabase practical limit
 
-  return { accepted, problems };
-}
+function bindCoverDropZone() {
+  const zone      = $("#cover-drop-zone");
+  const fileInput = $("#cover-file-input");
+  const browseBtn = $("#cover-browse-btn");
+  const clearBtn  = $("#clear-cover-btn");
 
-/* =====================================================================
-   IMAGE BAY — the drag & drop board, shared by write and revise
-     mode "deferred"  : files wait on the light table until you publish
-     mode "immediate" : files upload the moment they land
-   ===================================================================== */
+  const openPicker = () => fileInput?.click();
 
-function createImageBay({ mode, blogId, zone, input, grid, countEl, hintEl, onChange }) {
-  const items = [];
-  const takenKeys = new Set();
-  let sequence = 0;
-  let dragKey = null;
-
-  function countLabel() {
-    if (!items.length) return "None yet";
-    const waiting = items.filter((item) => item.kind === "local" && item.status !== "done").length;
-    const base = plural(items.length, "image", "images");
-    return mode === "deferred" && waiting ? `${base} · upload on publish` : base;
-  }
-
-  function paint() {
-    countEl.textContent = countLabel();
-    if (hintEl) hintEl.hidden = items.length < 2;
-    grid.innerHTML = "";
-
-    items.forEach((item, index) => {
-      const tile = el("li", `plate-tile is-${item.status}`);
-      tile.dataset.key = item.key;
-      tile.draggable = true;
-      tile.tabIndex = 0;
-      tile.setAttribute(
-        "aria-label",
-        `${item.name}, position ${index + 1} of ${items.length}. ` +
-          `Arrow keys reorder, Delete removes.`
-      );
-
-      const image = el("img");
-      image.src = item.previewUrl;
-      image.alt = "";
-      tile.appendChild(image);
-
-      if (index === 0) {
-        const stamp = el("span", "tile-stamp");
-        stamp.textContent = "Cover";
-        tile.appendChild(stamp);
-      }
-
-      const name = el("span", "tile-name");
-      name.textContent = item.name;
-      tile.appendChild(name);
-
-      const status = el("span", "tile-state");
-      status.textContent =
-        item.status === "uploading" ? "Uploading" : item.status === "failed" ? "Failed" : "";
-      tile.appendChild(status);
-
-      const drop = el("button", "tile-drop");
-      drop.type = "button";
-      drop.innerHTML = "&times;";
-      drop.setAttribute("aria-label", `Remove ${item.name}`);
-      drop.addEventListener("click", (event) => {
-        event.stopPropagation();
-        remove(item.key);
-      });
-      tile.appendChild(drop);
-
-      /* reorder by pointer */
-      tile.addEventListener("dragstart", (event) => {
-        dragKey = item.key;
-        tile.classList.add("is-dragging");
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", item.key);
-        }
-      });
-      tile.addEventListener("dragend", () => {
-        dragKey = null;
-        tile.classList.remove("is-dragging");
-        $$(".plate-tile", grid).forEach((node) => node.classList.remove("is-target"));
-      });
-      tile.addEventListener("dragover", (event) => {
-        if (!dragKey || dragKey === item.key) return;
-        event.preventDefault();
-        event.stopPropagation();
-        tile.classList.add("is-target");
-      });
-      tile.addEventListener("dragleave", () => tile.classList.remove("is-target"));
-      tile.addEventListener("drop", (event) => {
-        if (!dragKey) return;
-        event.preventDefault();
-        event.stopPropagation();
-        moveTo(dragKey, item.key);
-        dragKey = null;
-      });
-
-      /* reorder by keyboard */
-      tile.addEventListener("keydown", (event) => {
-        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-          event.preventDefault();
-          const target = index + (event.key === "ArrowLeft" ? -1 : 1);
-          if (target < 0 || target >= items.length) return;
-          items.splice(target, 0, items.splice(index, 1)[0]);
-          notify();
-          requestAnimationFrame(() => $(`[data-key="${item.key}"]`, grid)?.focus());
-        }
-        if (event.key === "Delete" || event.key === "Backspace") {
-          event.preventDefault();
-          remove(item.key);
-        }
-      });
-
-      grid.appendChild(tile);
+  if (zone) {
+    zone.addEventListener("click",   openPicker);
+    zone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); }
+    });
+    zone.addEventListener("dragover", (e) => {
+      e.preventDefault(); zone.classList.add("drag-over");
+    });
+    zone.addEventListener("dragleave", (e) => {
+      if (!zone.contains(e.relatedTarget)) zone.classList.remove("drag-over");
+    });
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zone.classList.remove("drag-over");
+      addPendingFiles(e.dataTransfer?.files);
     });
   }
 
-  function notify() {
-    paint();
-    if (onChange) onChange(items);
+  browseBtn?.addEventListener("click", (e) => { e.stopPropagation(); openPicker(); });
+  browseBtn?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); openPicker(); }
+  });
+
+  fileInput?.addEventListener("change", (e) => {
+    addPendingFiles(e.target.files);
+    e.target.value = "";
+  });
+
+  clearBtn?.addEventListener("click", () => {
+    state.pendingFiles.forEach((p) => URL.revokeObjectURL(p.preview));
+    state.pendingFiles = [];
+    renderPendingImages();
+  });
+}
+
+/* Accept many files at once, skipping non-images and oversized files */
+function addPendingFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+
+  let skipped = 0;
+  files.forEach((file) => {
+    if (!file.type.startsWith("image/")) { skipped++; return; }
+    if (file.size > MAX_IMAGE_BYTES)     { skipped++; return; }
+    state.pendingFiles.push({
+      id: `p${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      file,
+      preview: URL.createObjectURL(file), // object URL: no base64 cost
+    });
+  });
+
+  if (skipped) toast(`${skipped} file(s) skipped — must be an image under 10 MB.`, "error");
+  const added = files.length - skipped;
+  if (added > 0) toast(`${added} image${added > 1 ? "s" : ""} added.`, "success");
+
+  renderPendingImages();
+}
+
+function renderPendingImages() {
+  const grid     = $("#image-preview-grid");
+  const ph       = $("#cover-drop-placeholder");
+  const clearBtn = $("#clear-cover-btn");
+  const pill     = $("#images-count-pill");
+  const countEl  = $("#images-count");
+  if (!grid) return;
+
+  grid.innerHTML = state.pendingFiles.map((p, i) => `
+    <div class="image-preview-item" draggable="true" data-pid="${p.id}" data-index="${i}">
+      <img src="${p.preview}" alt="Selected image ${i + 1}" />
+      ${i === 0 ? `<span class="cover-flag">Cover</span>` : ""}
+      <button type="button" class="image-remove-btn" data-remove="${p.id}" aria-label="Remove image ${i + 1}">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>`).join("");
+
+  const n = state.pendingFiles.length;
+  if (clearBtn) clearBtn.style.display = n ? "" : "none";
+  if (pill)     pill.style.display     = n ? "" : "none";
+  if (countEl)  countEl.textContent    = n;
+  if (ph) {
+    const label = ph.querySelector("p");
+    if (label) label.textContent = n ? "Drop more images here" : "Drag & drop images here";
   }
 
-  function moveTo(sourceKey, targetKey) {
-    const from = items.findIndex((item) => item.key === sourceKey);
-    const to = items.findIndex((item) => item.key === targetKey);
-    if (from < 0 || to < 0 || from === to) return;
-    items.splice(to, 0, items.splice(from, 1)[0]);
-    notify();
+  $$("[data-remove]", grid).forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id  = btn.dataset.remove;
+      const idx = state.pendingFiles.findIndex((p) => p.id === id);
+      if (idx > -1) {
+        URL.revokeObjectURL(state.pendingFiles[idx].preview);
+        state.pendingFiles.splice(idx, 1);
+        renderPendingImages();
+      }
+    });
+  });
+
+  enableReorder(grid);
+  updateCreatePreview();
+}
+
+/* Drag-to-reorder previews; index 0 is the cover */
+function enableReorder(grid) {
+  let dragId = null;
+
+  $$(".image-preview-item", grid).forEach((item) => {
+    item.addEventListener("dragstart", (e) => {
+      dragId = item.dataset.pid;
+      item.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", dragId); } catch {}
+    });
+    item.addEventListener("dragend", () => {
+      dragId = null;
+      item.classList.remove("dragging");
+      $$(".image-preview-item", grid).forEach((n) => n.classList.remove("drop-target"));
+    });
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (dragId && item.dataset.pid !== dragId) item.classList.add("drop-target");
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drop-target"));
+    item.addEventListener("drop", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      item.classList.remove("drop-target");
+      const from = state.pendingFiles.findIndex((p) => p.id === dragId);
+      const to   = state.pendingFiles.findIndex((p) => p.id === item.dataset.pid);
+      if (from > -1 && to > -1 && from !== to) {
+        const [moved] = state.pendingFiles.splice(from, 1);
+        state.pendingFiles.splice(to, 0, moved);
+        renderPendingImages();
+      }
+    });
+  });
+}
+
+/* Upload selected files to the multipart endpoint.
+   Field name must be "images" to match: images: list[UploadFile] = File(...) */
+function uploadImagesForBlog(blogId, files, ui) {
+  return new Promise((resolve, reject) => {
+    if (!files.length) return resolve([]);
+
+    const form = new FormData();
+    files.forEach((f) => form.append("images", f, f.name));
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/blogs/${blogId}/images/upload`);
+    if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable || !ui) return;
+      const pct = Math.round((e.loaded / e.total) * 100);
+      if (ui.bar) ui.bar.style.width = `${pct}%`;
+      if (ui.pct) ui.pct.textContent = `${pct}%`;
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { resolve([]); }
+      } else {
+        let msg = `Image upload failed (${xhr.status})`;
+        try {
+          const d = JSON.parse(xhr.responseText).detail;
+          if (d) msg = Array.isArray(d) ? d.map((x) => x.msg).join(", ") : d;
+        } catch {}
+        reject(new Error(msg));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error during image upload."));
+    xhr.send(form);
+  });
+}
+
+/* ── Edit-page image manager ─────────────────── */
+
+function bindEditImageZone() {
+  const zone      = $("#edit-drop-zone");
+  const fileInput = $("#edit-file-input");
+  const browseBtn = $("#edit-browse-btn");
+  const openPicker = () => fileInput?.click();
+
+  if (zone) {
+    zone.addEventListener("click",   openPicker);
+    zone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); }
+    });
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drag-over"); });
+    zone.addEventListener("dragleave",(e) => { if (!zone.contains(e.relatedTarget)) zone.classList.remove("drag-over"); });
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zone.classList.remove("drag-over");
+      uploadToExistingBlog(e.dataTransfer?.files);
+    });
   }
+  browseBtn?.addEventListener("click", (e) => { e.stopPropagation(); openPicker(); });
+  fileInput?.addEventListener("change", (e) => {
+    uploadToExistingBlog(e.target.files);
+    e.target.value = "";
+  });
+}
 
-  async function remove(key) {
-    const index = items.findIndex((item) => item.key === key);
-    if (index < 0) return;
-    const item = items[index];
+async function uploadToExistingBlog(fileList) {
+  if (!state.editingBlog) return;
+  const files = Array.from(fileList || []).filter(
+    (f) => f.type.startsWith("image/") && f.size <= MAX_IMAGE_BYTES
+  );
+  if (!files.length) { toast("No valid images (max 10 MB each).", "error"); return; }
 
-    if (item.kind === "remote" && item.imageId) {
-      const ok = await confirmAction({
-        title: "Remove this image?",
-        message: `${item.name} is deleted from storage. This cannot be undone.`,
-        okLabel: "Remove",
-      });
-      if (!ok) return;
+  const wrap = $("#edit-upload-progress");
+  const bar  = $("#edit-upload-progress-bar");
+  const pct  = $("#edit-upload-progress-pct");
+  if (wrap) wrap.style.display = "";
+  if (bar)  bar.style.width = "0%";
+
+  try {
+    await uploadImagesForBlog(state.editingBlog.id, files, { bar, pct });
+    toast(`${files.length} image${files.length > 1 ? "s" : ""} uploaded.`, "success");
+    const fresh = await api(`/blogs/${state.editingBlog.id}`);
+    state.editingBlog = fresh;
+    cacheSet(`blog:${fresh.id}`, fresh);
+    cacheInvalidate("feed:", "me:blogs", "me:starred");
+    renderEditImages(fresh.images || []);
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    if (wrap) setTimeout(() => { wrap.style.display = "none"; }, 500);
+  }
+}
+
+function renderEditImages(images) {
+  const grid    = $("#edit-image-grid");
+  const pill    = $("#edit-images-count-pill");
+  const countEl = $("#edit-images-count");
+  if (!grid) return;
+
+  const sorted = sortImages(images);
+  grid.innerHTML = sorted.map((img, i) => `
+    <div class="image-preview-item" data-img-id="${img.id}">
+      <img src="${escAttr(fixImageUrl(img.image_url))}" alt="Image ${i + 1}" loading="lazy" />
+      ${i === 0 ? `<span class="cover-flag">Cover</span>` : ""}
+      <button type="button" class="image-remove-btn" data-del-img="${img.id}" aria-label="Delete image ${i + 1}">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>`).join("");
+
+  if (pill)    pill.style.display  = sorted.length ? "" : "none";
+  if (countEl) countEl.textContent = sorted.length;
+
+  $$("[data-del-img]", grid).forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id  = Number(btn.dataset.delImg);
+      const item = btn.closest(".image-preview-item");
+      if (item) item.classList.add("uploading");
       try {
-        await api(`/images/${item.imageId}`, { method: "DELETE" });
-        toast("Image removed.", "success");
-      } catch (error) {
-        toast(error.message, "error");
+        await api(`/images/${id}`, { method: "DELETE" });
+        toast("Image deleted.", "success");
+        const fresh = await api(`/blogs/${state.editingBlog.id}`);
+        state.editingBlog = fresh;
+        cacheSet(`blog:${fresh.id}`, fresh);
+        cacheInvalidate("feed:", "me:blogs", "me:starred");
+        renderEditImages(fresh.images || []);
+      } catch (err) {
+        toast(err.message, "error");
+        if (item) item.classList.remove("uploading");
+      }
+    });
+  });
+}
+
+/* ── Avatar drop zone ────────────────────────── */
+function bindAvatarDrop() {
+  const wrapper   = $("#profile-avatar-drop");
+  const fileInput = $("#avatar-file-input");
+
+  if (wrapper) {
+    wrapper.addEventListener("click",    () => fileInput?.click());
+    wrapper.addEventListener("keydown",  (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput?.click(); } });
+    wrapper.addEventListener("dragover", (e) => { e.preventDefault(); wrapper.classList.add("drag-over-avatar"); });
+    wrapper.addEventListener("dragleave",(e) => { if (!wrapper.contains(e.relatedTarget)) wrapper.classList.remove("drag-over-avatar"); });
+    wrapper.addEventListener("drop",     (e) => {
+      e.preventDefault();
+      wrapper.classList.remove("drag-over-avatar");
+      const f = e.dataTransfer?.files?.[0];
+      if (f) applyAvatarFile(f);
+    });
+  }
+  fileInput?.addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    if (f) applyAvatarFile(f);
+    e.target.value = "";
+  });
+}
+
+/* There is no file-upload endpoint for avatars — PATCH /users/me takes
+   profile_image as a string. So downscale to a small square and encode as a
+   compact JPEG data URL instead of shipping a multi-MB original. */
+function compressAvatar(file, size = 256, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        // center-crop to a square before scaling so faces aren't stretched
+        const side = Math.min(img.width, img.height);
+        const sx   = (img.width  - side) / 2;
+        const sy   = (img.height - side) / 2;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+        // PNG/GIF may carry transparency; flatten onto white for JPEG
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (err) { reject(err); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read that image.")); };
+    img.src = url;
+  });
+}
+
+async function applyAvatarFile(file) {
+  if (!file.type.startsWith("image/")) {
+    toast("Please choose an image file.", "error");
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    toast("That image is over 10 MB — pick a smaller one.", "error");
+    return;
+  }
+  try {
+    const dataUrl = await compressAvatar(file);
+    state.pendingAvatarDataUrl = dataUrl;
+    setAvatarPreviews(dataUrl);
+    const actions = $("#avatar-edit-actions");
+    if (actions) actions.style.display = "";
+    toast("Photo ready — hit Save Changes to apply.", "success");
+  } catch (err) {
+    toast(err.message || "Could not process that image.", "error");
+  }
+}
+
+/* Reflect a new avatar everywhere it appears */
+function setAvatarPreviews(src) {
+  const targets = ["#profile-avatar", "#nav-avatar", "#avatar-edit-preview"];
+  targets.forEach((sel) => {
+    const el = $(sel);
+    if (el) el.src = src;
+  });
+  const wrap = $(".avatar-upload-preview");
+  if (wrap) {
+    wrap.classList.remove("updated");
+    void wrap.offsetWidth; // restart the pop animation
+    wrap.classList.add("updated");
+  }
+}
+
+/* ── Avatar uploader inside the edit-profile panel ─────────── */
+function bindProfileAvatarUploader() {
+  const zone      = $("#avatar-edit-dropzone");
+  const fileInput = $("#avatar-edit-input");
+  const browseBtn = $("#avatar-edit-browse");
+  const resetBtn  = $("#avatar-edit-reset");
+  const openPicker = () => fileInput?.click();
+
+  if (zone) {
+    zone.addEventListener("click", openPicker);
+    zone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); }
+    });
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drag-over"); });
+    zone.addEventListener("dragleave", (e) => {
+      if (!zone.contains(e.relatedTarget)) zone.classList.remove("drag-over");
+    });
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zone.classList.remove("drag-over");
+      const f = e.dataTransfer?.files?.[0];
+      if (f) applyAvatarFile(f);
+    });
+  }
+
+  browseBtn?.addEventListener("click", (e) => { e.stopPropagation(); openPicker(); });
+  browseBtn?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); openPicker(); }
+  });
+
+  fileInput?.addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    if (f) applyAvatarFile(f);
+    e.target.value = "";
+  });
+
+  // discard the staged photo and restore the saved one
+  resetBtn?.addEventListener("click", () => {
+    state.pendingAvatarDataUrl = null;
+    setAvatarPreviews(avatarFor(state.user || {}));
+    const actions = $("#avatar-edit-actions");
+    if (actions) actions.style.display = "none";
+    toast("Photo change discarded.", "");
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   AUTH
+═══════════════════════════════════════════════ */
+
+async function hydrateAuth() {
+  document.body.classList.toggle("is-authenticated", Boolean(state.token));
+  if (!state.token) return;
+
+  const jwt = parseJwt(state.token);
+  const id  = jwt?.user_id;
+  if (!id) { logout(false); return; }
+
+  // Baseline from the token so the UI can paint before the request lands
+  state.user = {
+    id,
+    email: jwt?.user_email,
+    username: jwt?.user_email?.split("@")[0] || "Writer",
+  };
+  renderAuth();
+
+  try {
+    // GET /users/{id} -> PublicUser: username, profile_image, bio, created_at.
+    // This is what makes a saved avatar survive a page reload.
+    const profile = await cachedFetch(`user:${id}`, () => api(`/users/${id}`), () => {});
+    state.user = { ...state.user, ...profile, email: state.user.email || profile.email };
+    renderAuth();
+    if (pages.profile?.classList.contains("active")) renderProfileHeader();
+  } catch (err) {
+    // A 401 means the token is dead; anything else is non-fatal.
+    if (/401|invalid token/i.test(err.message)) logout(false);
+  }
+}
+
+function renderAuth() {
+  document.body.classList.toggle("is-authenticated", Boolean(state.token));
+  const user = state.user || {};
+  const name = user.username || user.email?.split("@")[0] || "Writer";
+  const nn = $("#nav-username"); if (nn) nn.textContent = name;
+  const na = $("#nav-avatar");   if (na) { na.src = state.pendingAvatarDataUrl || avatarFor(user); na.alt = name; }
+}
+
+async function onLogin(e) {
+  e.preventDefault();
+  const errEl = $("#login-error");
+  if (errEl) errEl.textContent = "";
+  const btn = $("#login-form .btn-primary");
+  setLoading(btn, true);
+  try {
+    const data = await api("/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("#login-email")?.value.trim(), password: $("#login-password")?.value }),
+    });
+    state.token = data.token;
+    localStorage.setItem(TOKEN_KEY, state.token);
+    // guest-view lists omit is_starred, so discard them on sign-in
+    cache.clear();
+    await hydrateAuth();
+    toast("Welcome back!", "success");
+    window.location.hash = "#/";
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message;
+  } finally { setLoading(btn, false); }
+}
+
+async function onSignup(e) {
+  e.preventDefault();
+  const errEl = $("#signup-error");
+  if (errEl) errEl.textContent = "";
+  const btn = $("#signup-form .btn-primary");
+  setLoading(btn, true);
+  try {
+    await api("/signup", {
+      method: "POST",
+      body: JSON.stringify({ email: $("#signup-email")?.value.trim(), password: $("#signup-password")?.value }),
+    });
+    toast("Account created — you can sign in now.", "success");
+    window.location.hash = "#/login";
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message;
+  } finally { setLoading(btn, false); }
+}
+
+function logout(announce = true) {
+  state.token = null;
+  state.user  = null;
+  state.pendingAvatarDataUrl = null;
+  cache.clear(); // never leak one account's cached data to the next
+  localStorage.removeItem(TOKEN_KEY);
+  renderAuth();
+  if (announce) toast("Logged out.", "success");
+  if (!["#/", ""].includes(window.location.hash)) window.location.hash = "#/";
+}
+
+/* ═══════════════════════════════════════════════
+   API
+═══════════════════════════════════════════════ */
+
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body !== undefined && !(options.body instanceof FormData) && !headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
+  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+  const res  = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const ct   = res.headers.get("content-type") || "";
+  const data = ct.includes("application/json") ? await res.json() : await res.text();
+  if (!res.ok) {
+    const d = typeof data === "object" ? (data.detail || data.message) : data;
+    throw new Error(Array.isArray(d) ? d.map((x) => x.msg).join(", ") : d || "Request failed");
+  }
+  return data;
+}
+
+/* ═══════════════════════════════════════════════
+   ROUTER
+═══════════════════════════════════════════════ */
+
+function route() {
+  const hash = window.location.hash || "#/";
+  const [rn, id] = hash.replace("#/", "").split("/");
+  const pn = rn || "feed";
+  Object.values(pages).forEach((p) => p?.classList.remove("active"));
+  $$(".nav-link, .mobile-link").forEach((l) => l.classList.remove("active"));
+  if (pn === "blog"    && id) return showBlog(id);
+  if (pn === "edit"    && id) return requireAuth(() => showEdit(id));
+  if (pn === "create")        return requireAuth(showCreate);
+  if (pn === "profile")       return requireAuth(showProfile);
+  if (pn === "starred")       return requireAuth(showStarredPage);
+  if (pn === "login")         return showPage("login");
+  if (pn === "signup")        return showPage("signup");
+  showFeed();
+}
+
+function showPage(name) {
+  pages[name]?.classList.add("active");
+  $(`[data-nav="${name === "feed" ? "feed" : name}"]`)?.classList.add("active");
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+
+function requireAuth(cb) {
+  if (!state.token) { toast("Please log in first.", "error"); window.location.hash = "#/login"; return; }
+  cb();
+}
+
+/* ═══════════════════════════════════════════════
+   FEED
+═══════════════════════════════════════════════ */
+
+function showFeed() { showPage("feed"); loadFeed(); }
+
+async function loadFeed() {
+  const grid    = $("#blog-grid");
+  const emptyEl = $("#feed-empty");
+  const key     = feedCacheKey();
+  const hit     = cacheGet(key);
+
+  if (emptyEl) emptyEl.style.display = "none";
+
+  // Only show skeletons on a genuine cold load. If we have cached data we
+  // paint it immediately, so skeletons would just cause a needless flash.
+  if (!hit) showSkeletons(grid, state.limit >= 6 ? 6 : state.limit);
+
+  const paint = (data, meta = {}) => {
+    state.blogs = normalizeBlogs(data.blogs || []);
+    state.total = data.total || 0;
+    renderBlogGrid(grid, state.blogs, { editable: false });
+    renderPagination();
+    clearBusy(grid);
+
+    const cp = $("#feed-result-count");
+    if (cp) {
+      cp.innerHTML = `Showing <span>${state.blogs.length}</span> ${state.blogs.length === 1 ? "article" : "articles"}`;
+    }
+    if (emptyEl) emptyEl.style.display = state.blogs.length ? "none" : "";
+
+    // thin progress line while a stale list refreshes behind the scenes
+    grid?.classList.toggle("grid-revalidating", Boolean(meta.fromCache && hit?.stale));
+    if (meta.revalidated) grid?.classList.remove("grid-revalidating");
+  };
+
+  try {
+    await cachedFetch(key, () => {
+      const params = new URLSearchParams({
+        page: state.page, limit: state.limit, search: state.search, sort: state.sort,
+      });
+      return api(`/blogs?${params}`);
+    }, paint);
+  } catch (err) {
+    toast(err.message, "error");
+    if (grid) grid.innerHTML = "";
+    clearBusy(grid);
+    if (emptyEl) emptyEl.style.display = "";
+  } finally {
+    grid?.classList.remove("grid-revalidating");
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   BLOG CARDS
+═══════════════════════════════════════════════ */
+
+/* Reveal cards as they enter the viewport instead of animating every card
+   on load. Offscreen cards stay cheap (paired with content-visibility). */
+function observeReveal(root) {
+  const cards = $$(".blog-card", root);
+  if (!("IntersectionObserver" in window)) {
+    cards.forEach((c) => c.classList.add("revealed"));
+    return;
+  }
+  if (!revealObserver) {
+    revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        const i  = Number(el.dataset.revealIndex || 0);
+        // small stagger, capped so later cards don't feel laggy
+        setTimeout(() => el.classList.add("revealed"), Math.min(i, 7) * 55);
+        revealObserver.unobserve(el);
+      });
+    }, { rootMargin: "80px 0px", threshold: 0.05 });
+  }
+  cards.forEach((card, i) => {
+    card.dataset.revealIndex = i;
+    revealObserver.observe(card);
+  });
+
+  // Safety net: cards start at opacity 0, so if the observer never fires
+  // (hidden tab, odd layout, observer quirk) force them visible.
+  setTimeout(() => cards.forEach((c) => c.classList.add("revealed")), 1200);
+}
+
+/* Reveal any cards inside a container that just became visible */
+function revealAllIn(sel) {
+  $$(`${sel} .blog-card`).forEach((c) => c.classList.add("revealed"));
+}
+
+function renderBlogGrid(root, blogs, options) {
+  if (!root) return;
+  root.innerHTML = blogs.map((b) => blogCard(b, options)).join("");
+  observeReveal(root);
+  $$("[data-star]", root).forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      toggleStar(Number(btn.dataset.star), btn.dataset.starred === "true", btn);
+    });
+  });
+  $$("[data-delete]", root).forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      confirmDelete(Number(btn.dataset.delete));
+    });
+  });
+}
+
+function blogCard(blog, { editable = false } = {}) {
+  const image    = primaryImage(blog);
+  const owner    = blog.owner || {};
+  const readTime = calcReadTime(blog.content);
+  const starred  = Boolean(blog.is_starred);
+
+  const imgCount = sortImages(blog.images).length;
+
+  // Always show the image at full 16:9 when available.
+  // decoding="async" + lazy loading keeps the feed responsive while images stream in.
+  const thumbHtml = image
+    ? `<div class="blog-thumb">
+         <img src="${escAttr(image)}" alt="${escAttr(blog.title)}" loading="lazy" decoding="async"
+              onerror="this.style.display='none'" />
+         <span class="blog-thumb-badge">${readTime}</span>
+         ${imgCount > 1 ? `<span class="blog-thumb-count">
+           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+           ${imgCount}</span>` : ""}
+       </div>`
+    : `<div class="blog-thumb-placeholder">
+         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+           <rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+         </svg>
+       </div>`;
+
+  const sf = starred ? "#d97706" : "none";
+  const ss = starred ? "#d97706" : "currentColor";
+  const starSvg = `<svg width="17" height="17" viewBox="0 0 24 24" fill="${sf}" stroke="${ss}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+
+  const editHtml = editable
+    ? `<div style="display:flex;gap:8px;">
+         <a class="btn btn-ghost btn-sm" href="#/edit/${blog.id}">Edit</a>
+         <button class="btn btn-danger btn-sm" data-delete="${blog.id}">Delete</button>
+       </div>` : "";
+
+  return `
+    <article class="blog-card" aria-label="${escAttr(blog.title)}">
+      <a class="blog-card-link" href="#/blog/${blog.id}">
+        ${thumbHtml}
+        <div class="blog-body">
+          <h3 class="blog-title">${escHtml(blog.title)}</h3>
+          <p class="blog-excerpt">${escHtml(blog.content || "")}</p>
+          <div class="blog-meta">
+            <span class="blog-author">
+              <img class="author-avatar" src="${escAttr(avatarFor(owner))}" alt="${escAttr(owner.username || "Author")}" loading="lazy" />
+              <span>${escHtml(owner.username || "Writer")}</span>
+            </span>
+            <span>${timeAgo(blog.created_at)}</span>
+          </div>
+        </div>
+      </a>
+      <div class="blog-card-actions">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="icon-btn${starred ? " active" : ""}" data-star="${blog.id}" data-starred="${starred}"
+            aria-label="${starred ? "Remove star" : "Star article"}" aria-pressed="${starred}">${starSvg}</button>
+          <span style="font-size:0.86rem;color:var(--text-muted);font-weight:700;">${blog.star_count ?? 0}</span>
+        </div>
+        ${editHtml}
+      </div>
+    </article>`;
+}
+
+function renderPagination() {
+  const el = $("#pagination");
+  if (!el) return;
+  const total = Math.max(1, Math.ceil(state.total / state.limit));
+  if (total <= 1) { el.innerHTML = ""; return; }
+  el.innerHTML = Array.from({ length: total }, (_, i) => {
+    const p = i + 1;
+    return `<button class="page-btn${p === state.page ? " active" : ""}" data-page="${p}">${p}</button>`;
+  }).join("");
+  $$("#pagination .page-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.page = Number(btn.dataset.page);
+      loadFeed();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   BLOG DETAIL
+═══════════════════════════════════════════════ */
+
+async function showBlog(id) {
+  showPage("blog");
+  const skeleton = $("#blog-detail-skeleton");
+  const content  = $("#blog-detail-content");
+  const key      = `blog:${id}`;
+  const hit      = cacheGet(key);
+
+  // Cached post: render instantly, skip the skeleton entirely
+  if (hit) {
+    if (skeleton) skeleton.style.display = "none";
+    if (content)  content.style.display  = "";
+  } else {
+    if (skeleton) skeleton.style.display = "";
+    if (content)  content.style.display  = "none";
+  }
+
+  const paint = (blog) => {
+    state.currentBlog = blog;
+    if (content) {
+      content.innerHTML = blogDetailHtml(blog);
+      content.style.display = "";
+    }
+    if (skeleton) skeleton.style.display = "none";
+
+    const starBtn = $("[data-detail-star]");
+    starBtn?.addEventListener("click", () => toggleStar(blog.id, blog.is_starred, starBtn, true));
+    $("[data-detail-delete]")?.addEventListener("click", () => confirmDelete(blog.id));
+    $$(".blog-detail-image, .detail-gallery img").forEach((img) =>
+      img.addEventListener("click", () => openLightbox(img.src))
+    );
+  };
+
+  try {
+    await cachedFetch(key, () => api(`/blogs/${id}`), paint);
+  } catch (err) {
+    if (content) {
+      content.innerHTML = `<div class="empty-state"><div class="empty-state-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><h3>Post unavailable</h3><p>${escHtml(err.message)}</p><a href="#/" class="btn btn-primary btn-sm" style="margin-top:20px;">Back to feed</a></div>`;
+      content.style.display = "";
+    }
+  } finally { if (skeleton) skeleton.style.display = "none"; }
+}
+
+function blogDetailHtml(blog) {
+  const image   = primaryImage(blog);
+  const isOwner = state.user?.id && blog.owner?.id === state.user.id;
+  // Cover is rendered above; the gallery shows the remaining images
+  const allImgs = sortImages(blog.images);
+  const gallery = allImgs.slice(1).map((img, i) =>
+    `<img src="${escAttr(fixImageUrl(img.image_url))}" alt="Image ${i + 2} of ${allImgs.length}" loading="lazy" decoding="async">`
+  ).join("");
+  const starred = Boolean(blog.is_starred);
+  const dsf     = starred ? "currentColor" : "none";
+  const dStar   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="${dsf}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`;
+  const ownerHtml = isOwner
+    ? `<a class="btn btn-ghost btn-sm" href="#/edit/${blog.id}" style="display:inline-flex;gap:7px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit</a>
+       <button class="btn btn-danger btn-sm" data-detail-delete style="display:inline-flex;gap:7px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Delete</button>` : "";
+  return `
+    <article class="blog-detail-hero">
+      ${image ? `<img class="blog-detail-image" src="${escAttr(image)}" alt="${escAttr(blog.title)}" />` : ""}
+      <div class="blog-detail-body">
+        <a class="btn btn-ghost btn-sm" href="#/" style="margin-bottom:22px;display:inline-flex;gap:7px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>Back to feed
+        </a>
+        <h1 class="blog-detail-title">${escHtml(blog.title)}</h1>
+        <div class="blog-detail-meta">
+          <div style="display:flex;align-items:center;gap:14px;">
+            <img class="author-avatar" style="width:44px;height:44px;border-width:2px;"
+              src="${escAttr(avatarFor(blog.owner))}" alt="${escAttr(blog.owner?.username || "Author")}" />
+            <div>
+              <div style="font-weight:800;color:var(--text-primary);font-size:0.97rem;">${escHtml(blog.owner?.username || "Writer")}</div>
+              <div style="font-size:0.83rem;color:var(--text-muted);">${formatDate(blog.created_at)} &bull; ${calcReadTime(blog.content)}</div>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button class="btn ${starred ? "btn-primary" : "btn-secondary"} btn-sm" data-detail-star
+              style="display:flex;align-items:center;gap:7px;" aria-pressed="${starred}">
+              ${dStar}<span>${starred ? "Starred" : "Star"}</span><span style="opacity:0.75;">(${blog.star_count ?? 0})</span>
+            </button>
+            ${ownerHtml}
+          </div>
+        </div>
+        <div class="blog-detail-content">${escHtml(blog.content || "")}</div>
+        ${gallery ? `<h3 style="margin-top:44px;font-weight:800;font-size:1.05rem;">Gallery <span style="color:var(--text-dim);font-weight:600;font-size:0.85rem;">(${allImgs.length} images)</span></h3><div class="detail-gallery">${gallery}</div>` : ""}
+      </div>
+    </article>`;
+}
+
+/* ═══════════════════════════════════════════════
+   CREATE
+═══════════════════════════════════════════════ */
+
+function showCreate() {
+  showPage("create");
+  $("#create-form")?.reset();
+
+  // release any previously queued object URLs
+  state.pendingFiles.forEach((p) => URL.revokeObjectURL(p.preview));
+  state.pendingFiles = [];
+
+  const ce = $("#create-title-count"); if (ce) ce.textContent = "0";
+  const ve = $("#visibility-value");   if (ve) ve.textContent = "Public";
+  const up = $("#upload-progress");    if (up) up.style.display = "none";
+
+  renderPendingImages();
+}
+
+async function onCreateBlog(e) {
+  e.preventDefault();
+  const title   = $("#create-title")?.value.trim();
+  const content = $("#create-content")?.value.trim();
+  if (!title || !content) return toast("Title and content are required.", "error");
+
+  const btn      = $("#publish-btn");
+  const files    = state.pendingFiles.map((p) => p.file);
+  const progress = $("#upload-progress");
+  const bar      = $("#upload-progress-bar");
+  const pct      = $("#upload-progress-pct");
+  const label    = $("#upload-progress-label");
+
+  setLoading(btn, true);
+  try {
+    // 1. Create the post. `thumbnail` is Optional[str] with no default in
+    //    BlogCreate, so the key must be present — and BlogResponse doesn't
+    //    return it anyway, so images are the real source of truth.
+    const blog = await api("/blogs", {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        content,
+        visibility: $("#create-visibility")?.checked ?? true,
+        thumbnail: null,
+        images: [],
+      }),
+    });
+
+    // 2. Upload the queued files as real multipart uploads -> Supabase URLs.
+    if (files.length) {
+      if (progress) progress.style.display = "";
+      if (label) label.textContent = `Uploading ${files.length} image${files.length > 1 ? "s" : ""}…`;
+      if (bar) bar.style.width = "0%";
+      try {
+        await uploadImagesForBlog(blog.id, files, { bar, pct });
+      } catch (uploadErr) {
+        // Post exists; only the images failed. Don't lose the user's writing.
+        toast(`Post published, but images failed: ${uploadErr.message}`, "error");
+        state.pendingFiles.forEach((p) => URL.revokeObjectURL(p.preview));
+        state.pendingFiles = [];
+        cacheInvalidate("feed:", "me:blogs");
+        window.location.hash = `#/blog/${blog.id}`;
         return;
       }
     }
 
-    if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
-    takenKeys.delete(item.dedupeKey);
-    items.splice(index, 1);
-    notify();
-  }
-
-  async function addFiles(fileList) {
-    const files = Array.from(fileList || []);
-    if (!files.length) return;
-
-    const { accepted, problems } = screenImageFiles(files, takenKeys);
-    problems.forEach((problem) => toast(problem, "error"));
-    if (!accepted.length) return;
-
-    const fresh = accepted.map((file) => {
-      const objectUrl = URL.createObjectURL(file);
-      return {
-        key: `local-${(sequence += 1)}`,
-        dedupeKey: `${file.name}:${file.size}`,
-        kind: "local",
-        file,
-        name: file.name,
-        previewUrl: objectUrl,
-        objectUrl,
-        status: "ready",
-      };
-    });
-
-    items.push(...fresh);
-    notify();
-
-    if (mode === "immediate") {
-      await uploadItems(fresh);
-    } else {
-      toast(`${plural(fresh.length, "image", "images")} on the light table.`, "success", 2600);
-    }
-  }
-
-  /* One request per file. Each POST appends, so the order on screen becomes
-     the display_order in the database, and every tile reports its own state. */
-  async function uploadItems(targets) {
-    const pending = targets.filter((item) => item.kind === "local" && item.status !== "done");
-    if (!pending.length) return { uploaded: 0, failed: 0 };
-    if (!blogId) return { uploaded: 0, failed: pending.length };
-
-    let uploaded = 0;
-    let failed = 0;
-
-    for (const item of pending) {
-      item.status = "uploading";
-      paint();
-      try {
-        const form = new FormData();
-        form.append("images", item.file, item.name);
-        const result = await api(`/blogs/${blogId}/images/upload`, {
-          method: "POST",
-          body: form,
-          form: true,
-        });
-        const created = Array.isArray(result) ? result[0] : result;
-
-        item.kind = "remote";
-        item.imageId = created?.id;
-        item.status = "done";
-        item.file = null;
-        if (created?.image_url) {
-          if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
-          item.objectUrl = null;
-          item.previewUrl = fixImageUrl(created.image_url);
-        }
-        uploaded += 1;
-      } catch (error) {
-        item.status = "failed";
-        failed += 1;
-        toast(`${item.name}: ${error.message}`, "error");
-      }
-      paint();
-    }
-
-    if (onChange) onChange(items);
-    return { uploaded, failed };
-  }
-
-  function setRemote(images) {
-    items.forEach((item) => item.objectUrl && URL.revokeObjectURL(item.objectUrl));
-    items.length = 0;
-    takenKeys.clear();
-
-    sortImages(images).forEach((image) => {
-      const url = fixImageUrl(image.image_url);
-      const filename = decodeURIComponent(url.split("/").pop() || "");
-      items.push({
-        key: `remote-${image.id}`,
-        dedupeKey: `remote-${image.id}`,
-        kind: "remote",
-        imageId: image.id,
-        /* stored names are "<uuid>_<original>" — show the readable half */
-        name: filename.split("_").slice(1).join("_") || filename || `image-${image.id}`,
-        previewUrl: url,
-        objectUrl: null,
-        status: "done",
-      });
-      takenKeys.add(`remote-${image.id}`);
-    });
-
-    notify();
-  }
-
-  function reset() {
-    items.forEach((item) => item.objectUrl && URL.revokeObjectURL(item.objectUrl));
-    items.length = 0;
-    takenKeys.clear();
-    notify();
-  }
-
-  bindFileDrop(zone, addFiles);
-  bindZoneActivation(zone, input);
-  input.addEventListener("change", () => {
-    addFiles(input.files);
-    input.value = "";
-  });
-
-  paint();
-
-  return {
-    items,
-    addFiles,
-    reset,
-    setRemote,
-    uploadItems,
-    setBlogId(id) {
-      blogId = id;
-    },
-  };
-}
-
-/* =====================================================================
-   WRITE
-   ===================================================================== */
-
-function renderProof() {
-  const body = $("#preview-body");
-  const stamp = $("#page-create .proof-stamp");
-  const title = $("#create-title").value.trim();
-  const content = $("#create-content").value.trim();
-  const images = state.createBay ? state.createBay.items : [];
-
-  if (stamp) stamp.textContent = title || content ? "Not printed" : "Empty";
-
-  if (!title && !content) {
-    body.innerHTML = `<p class="proof-blank">Type a title to pull a proof.</p>`;
-    return;
-  }
-
-  body.innerHTML = proofMarkup(title, content, images);
-}
-
-function proofMarkup(title, content, images) {
-  return `
-    <h2>${escapeHtml(title || "Untitled")}</h2>
-    <p class="proof-text">${escapeHtml(content || "No text yet.")}</p>
-    ${
-      images.length
-        ? `<div class="proof-strip">${images
-            .slice(0, 6)
-            .map((item) => `<img src="${escapeAttr(item.previewUrl)}" alt="" />`)
-            .join("")}</div>`
-        : ""
-    }`;
-}
-
-async function onCreateBlog(event) {
-  event.preventDefault();
-  if (!requireAuth("Log in to publish a story.")) return;
-
-  const button = $("#publish-btn");
-  const title = $("#create-title").value.trim();
-  const content = $("#create-content").value.trim();
-  const visibility = $("#create-visibility").checked;
-
-  if (!title) {
-    toast("Give the story a title.", "error");
-    $("#create-title").focus();
-    return;
-  }
-  if (!content) {
-    toast("The story is empty.", "error");
-    $("#create-content").focus();
-    return;
-  }
-
-  setLoading(button, true);
-
-  try {
-    /* BlogCreate.thumbnail is Optional[str] with no default, so the key has
-       to be present even though the value is null. */
-    const blog = await api("/blogs", {
-      method: "POST",
-      body: { title, content, visibility, thumbnail: null, images: [] },
-    });
-
-    const bay = state.createBay;
-    const queued = bay ? bay.items.filter((item) => item.kind === "local").length : 0;
-
-    if (queued) {
-      bay.setBlogId(blog.id);
-      const { uploaded, failed } = await bay.uploadItems([...bay.items]);
-      if (failed) {
-        toast(`Published. ${uploaded} of ${queued} images uploaded.`, "error", 6500);
-      } else {
-        toast(`Published with ${plural(uploaded, "image", "images")}.`, "success");
-      }
-    } else {
-      toast("Published.", "success");
-    }
-
-    $("#create-form").reset();
-    $("#create-title-count").textContent = "0";
-    $("#visibility-value").textContent = "Public";
-    bay?.reset();
-    bay?.setBlogId(null);
-    renderProof();
-    location.hash = `#/blog/${blog.id}`;
-  } catch (error) {
-    toast(error.message, "error");
+    state.pendingFiles.forEach((p) => URL.revokeObjectURL(p.preview));
+    state.pendingFiles = [];
+    cacheInvalidate("feed:", "me:blogs");   // new post must appear in lists
+    toast(files.length ? "Article published with images!" : "Article published!", "success");
+    window.location.hash = `#/blog/${blog.id}`;
+  } catch (err) {
+    toast(err.message, "error");
   } finally {
-    setLoading(button, false);
+    setLoading(btn, false);
+    if (progress) progress.style.display = "none";
   }
 }
 
-/* =====================================================================
-   REVISE
-   ===================================================================== */
+function updateCreatePreview() {
+  const title   = $("#create-title")?.value.trim();
+  const content = $("#create-content")?.value.trim();
+  const thumb   = state.pendingFiles[0]?.preview || "";
+  const extra   = Math.max(0, state.pendingFiles.length - 1);
+  const preview = $("#preview-body");
+  if (!preview) return;
+  if (!title && !content && !thumb) {
+    preview.innerHTML = `<p style="color:var(--text-dim);font-size:0.9rem;">Start typing to see a live preview.</p>`;
+    return;
+  }
+  preview.innerHTML = `
+    ${thumb ? `
+      <div style="position:relative;margin-bottom:14px;">
+        <img src="${escAttr(thumb)}" style="width:100%;height:160px;object-fit:cover;border-radius:var(--r-lg);display:block;" alt="Cover preview" />
+        ${extra ? `<span style="position:absolute;bottom:8px;right:8px;padding:3px 10px;border-radius:var(--r-full);background:rgba(15,23,42,0.78);color:#fff;font-size:0.7rem;font-weight:800;">+${extra} more</span>` : ""}
+      </div>` : ""}
+    <h2 style="font-size:1.25rem;font-weight:800;margin-bottom:10px;letter-spacing:-0.02em;">${escHtml(title || "Untitled")}</h2>
+    <div style="font-size:0.9rem;color:var(--text-muted);white-space:pre-wrap;line-height:1.65;">${escHtml((content || "").slice(0, 300))}${(content || "").length > 300 ? "…" : ""}</div>`;
+}
 
-async function renderEditPage(id) {
-  const body = $("#edit-preview-body");
-  body.innerHTML = `<p class="proof-blank">Loading&hellip;</p>`;
-  state.editBay.setBlogId(null);
-  state.editBay.reset();
+/* ═══════════════════════════════════════════════
+   EDIT
+═══════════════════════════════════════════════ */
 
+async function showEdit(id) {
+  showPage("edit");
   try {
     const blog = await api(`/blogs/${id}`);
+    state.editingBlog = blog;
+    const t  = $("#edit-title");           if (t)  t.value    = blog.title   || "";
+    const c  = $("#edit-content");         if (c)  c.value    = blog.content || "";
+    const v  = $("#edit-visibility");      if (v)  v.checked  = Boolean(blog.visibility);
+    const vv = $("#edit-visibility-value");if (vv) vv.textContent = blog.visibility ? "Public" : "Private";
+    renderEditImages(blog.images || []);
+  } catch (err) { toast(err.message, "error"); window.location.hash = "#/"; }
+}
 
-    if (!state.user || blog.owner?.id !== state.user.id) {
-      toast("That story is not yours to edit.", "error");
-      location.hash = `#/blog/${id}`;
+async function onUpdateBlog(e) {
+  e.preventDefault();
+  if (!state.editingBlog) return;
+  const btn = $("#update-btn");
+  setLoading(btn, true);
+  try {
+    await api(`/blogs/${state.editingBlog.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: $("#edit-title")?.value.trim(), content: $("#edit-content")?.value.trim(), visibility: $("#edit-visibility")?.checked }),
+    });
+    cacheInvalidate("feed:", "me:blogs", "me:starred", `blog:${state.editingBlog.id}`);
+    toast("Article updated.", "success");
+    window.location.hash = `#/blog/${state.editingBlog.id}`;
+  } catch (err) { toast(err.message, "error"); }
+  finally { setLoading(btn, false); }
+}
+
+/* ═══════════════════════════════════════════════
+   PROFILE
+═══════════════════════════════════════════════ */
+
+async function showProfile() {
+  showPage("profile");
+  renderProfileHeader();
+  await Promise.all([loadMyBlogs(), loadStarredBlogs()]);
+}
+
+function renderProfileHeader() {
+  const user = state.user || {};
+  const p = $("#avatar-edit-preview"); if (p) p.src = state.pendingAvatarDataUrl || avatarFor(user);
+  const a = $("#profile-avatar");    if (a)  a.src          = state.pendingAvatarDataUrl || avatarFor(user);
+  const n = $("#profile-username");  if (n)  n.textContent  = user.username || user.email?.split("@")[0] || "Writer";
+  const em= $("#profile-email");     if (em) em.textContent = user.email || "Signed in";
+  const b = $("#profile-bio");       if (b)  b.textContent  = user.bio || "No bio added yet.";
+  const j = $("#profile-joined");    if (j)  j.textContent  = user.created_at ? `Member since ${formatDate(user.created_at)}` : "";
+}
+
+function showProfileEditor() {
+  const user  = state.user || {};
+  const panel = $("#profile-edit");
+  if (!panel) return;
+  panel.style.display = "block";
+
+  const u = $("#edit-username"); if (u) u.value = user.username || "";
+  const b = $("#edit-bio");      if (b) b.value = user.bio      || "";
+
+  // seed the photo preview with the staged image, else the saved one
+  const preview = $("#avatar-edit-preview");
+  if (preview) preview.src = state.pendingAvatarDataUrl || avatarFor(user);
+
+  const actions = $("#avatar-edit-actions");
+  if (actions) actions.style.display = state.pendingAvatarDataUrl ? "" : "none";
+
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function onSaveProfile(e) {
+  e.preventDefault();
+  const btn = $("#save-profile-btn");
+  setLoading(btn, true);
+  try {
+    // Only send keys that actually have values. The backend uses
+    // model_dump(exclude_unset=True), which drops *omitted* fields but still
+    // writes explicit nulls — and `username` is NOT NULL in the DB.
+    const payload = {};
+
+    const username = $("#edit-username")?.value.trim();
+    if (username) payload.username = username;
+
+    const bio = $("#edit-bio")?.value.trim();
+    if (bio !== undefined) payload.bio = bio; // "" is valid: clears the bio
+
+    if (state.pendingAvatarDataUrl) payload.profile_image = state.pendingAvatarDataUrl;
+
+    if (!Object.keys(payload).length) {
+      toast("Nothing to save.", "");
+      setLoading(btn, false);
       return;
     }
+    const user = await api("/users/me", { method: "PATCH", body: JSON.stringify(payload) });
+    state.user = user;
+    state.pendingAvatarDataUrl = null;
 
-    state.editBlog = blog;
-    $("#edit-title").value = blog.title || "";
-    $("#edit-content").value = blog.content || "";
-    $("#edit-visibility").checked = Boolean(blog.visibility);
-    $("#edit-visibility-value").textContent = blog.visibility ? "Public" : "Private";
-    $("#edit-cancel").setAttribute("href", `#/blog/${id}`);
+    const actions = $("#avatar-edit-actions");
+    if (actions) actions.style.display = "none";
 
-    state.editBay.setBlogId(blog.id);
-    state.editBay.setRemote(blog.images);
-    renderEditProof();
-  } catch (error) {
-    body.innerHTML = `<p class="proof-blank">${escapeHtml(error.message)}</p>`;
-    toast(error.message, "error");
-  }
+    // author name/photo is embedded in every cached list
+    cacheInvalidate("feed:", "me:blogs", "me:starred", "blog:", "user:");
+    cacheSet(`user:${user.id}`, user);
+
+    renderAuth();
+    renderProfileHeader();
+    $("#profile-edit").style.display = "none";
+    toast("Profile saved.", "success");
+
+    // repaint lists so the new name/photo shows straight away
+    loadMyBlogs();
+    loadStarredBlogs();
+  } catch (err) { toast(err.message, "error"); }
+  finally { setLoading(btn, false); }
 }
 
-function renderEditProof() {
-  const images = state.editBay ? state.editBay.items : [];
-  $("#edit-preview-body").innerHTML = proofMarkup(
-    $("#edit-title").value.trim(),
-    $("#edit-content").value.trim(),
-    images
-  );
-}
-
-async function onUpdateBlog(event) {
-  event.preventDefault();
-  const blog = state.editBlog;
-  if (!blog) return;
-
-  const button = $("#update-btn");
-  const title = $("#edit-title").value.trim();
-  const content = $("#edit-content").value.trim();
-  const visibility = $("#edit-visibility").checked;
-
-  if (!title || !content) {
-    toast("A story needs both a title and text.", "error");
-    return;
-  }
-
-  setLoading(button, true);
-  try {
-    /* BlogUpdate accepts only these three fields. */
-    await api(`/blogs/${blog.id}`, {
-      method: "PATCH",
-      body: { title, content, visibility },
-    });
-    toast("Changes saved.", "success");
-    location.hash = `#/blog/${blog.id}`;
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    setLoading(button, false);
-  }
-}
-
-/* =====================================================================
-   YOUR DESK
-   ===================================================================== */
-
-/* /users/me/blogs and /users/me/starred have no response_model, so they hand
-   back raw rows: no owner, no images, no star counts. Fill in what we know,
-   then hydrate each card from GET /blogs/{id}. */
-function normalizeOwnBlogs(rows, fallbackOwner) {
-  return (rows || []).map((row) => ({
-    id: row.id,
-    title: row.title,
-    content: row.content,
-    visibility: row.visibility,
-    created_at: row.created_at,
-    owner: row.owner || fallbackOwner || { id: row.author_id, username: "unknown" },
-    images: row.images || [],
-    star_count: row.star_count ?? 0,
-    comment_count: row.comment_count ?? 0,
-    is_starred: row.is_starred ?? false,
-  }));
-}
-
-async function hydrateCards(blogs, gridId) {
-  const queue = blogs.map((blog, index) => ({ blog, index }));
+/* /users/me/blogs and /users/me/starred have no response_model, so FastAPI
+   serialises the bare ORM rows: no images, no owner, no star_count. Fill those
+   in from /blogs/{id}, which also warms the detail cache for instant clicks. */
+async function hydrateBlogDetails(list, onDone, options) {
+  const out = list.slice();
+  const CONCURRENCY = 5;
+  let cursor = 0;
+  let changed = false;
 
   const worker = async () => {
-    while (queue.length) {
-      const { blog, index } = queue.shift();
-      try {
-        const full = await api(`/blogs/${blog.id}`);
-        Object.assign(blog, full);
-      } catch {
+    while (cursor < out.length) {
+      const idx  = cursor++;
+      const item = out[idx];
+      if (!item) continue;
+      // Raw rows from the list endpoints lack both of these; a hydrated
+      // record has them. Checking before normalisation matters, because
+      // normalizeBlogs() always fills `images` with at least [].
+      if (item.images !== undefined && item.star_count !== undefined) continue;
+
+      const key = `blog:${item.id}`;
+      const hit = cacheGet(key);
+      if (hit && !hit.stale) {
+        out[idx] = { ...item, ...hit.data };
+        changed = true;
         continue;
       }
-      const grid = document.getElementById(gridId);
-      const card = grid ? $(`[data-card="${blog.id}"]`, grid) : null;
-      if (!card) continue;
-      card.outerHTML = storyCard(blog, index + 1, 0);
-      $(`[data-card="${blog.id}"]`, grid)?.classList.add("is-revealed");
+      try {
+        const full = await api(`/blogs/${item.id}`);
+        cacheSet(key, full);
+        out[idx] = { ...item, ...full };
+        changed = true;
+      } catch {
+        /* keep the partial row rather than dropping the card */
+      }
     }
   };
 
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, out.length) }, worker)
+  );
+
+  if (changed) onDone(normalizeBlogs(out), options);
+  return out;
 }
 
-async function renderProfile() {
-  const user = state.user;
-  if (!user) return;
-
-  $("#profile-username").textContent = user.username || "";
-  $("#profile-username").dataset.plate = user.username || "";
-  $("#profile-email").textContent = user.email || "";
-  $("#profile-bio").textContent = user.bio || "No bio yet.";
-  $("#profile-joined").textContent = user.created_at
-    ? `Member since ${formatDate(user.created_at)}`
-    : "Your desk";
-  $("#profile-avatar").src = avatarFor(user);
-  $("#profile-avatar").alt = user.username ? `${user.username}'s photo` : "";
-
-  $("#edit-username").value = user.username || "";
-  $("#edit-bio").value = user.bio || "";
-  $("#avatar-drop-img").src = avatarFor(user);
-  $("#avatar-clear").hidden = !user.profile_image;
-
-  await Promise.all([loadOwnBlogs(), loadStarredBlogs()]);
-}
-
-async function loadOwnBlogs() {
-  const grid = $("#my-blogs-grid");
+async function loadMyBlogs() {
+  const root  = $("#my-blogs-grid");
   const empty = $("#my-blogs-empty");
-  empty.hidden = true;
-  grid.innerHTML = `<div class="sk-card"><span class="sk sk-block"></span><span class="sk sk-line" style="width:82%;height:20px"></span><span class="sk sk-line" style="width:94%"></span></div>`;
-
+  const key   = "me:blogs";
+  if (!cacheGet(key)) showSkeletons(root, 3);
+  if (empty) empty.style.display = "none";
   try {
-    const rows = await api("/users/me/blogs");
-    const blogs = normalizeOwnBlogs(rows, state.user).sort(
-      (a, b) => new Date(b.created_at) - new Date(a.created_at)
-    );
-    state.ownBlogs = blogs;
-
-    if (!blogs.length) {
-      grid.innerHTML = "";
-      empty.hidden = false;
-      return;
-    }
-
-    grid.innerHTML = blogs.map((blog, i) => storyCard(blog, i + 1, i)).join("");
-    observeReveals(grid);
-    hydrateCards(blogs, "my-blogs-grid");
-  } catch (error) {
-    grid.innerHTML = "";
-    empty.hidden = false;
-    toast(error.message, "error");
+    const blogs = await cachedFetch(key, () => api("/users/me/blogs"), (raw) => {
+      const list = normalizeBlogs(raw);
+      renderBlogGrid(root, list, { editable: true });
+      clearBusy(root);
+      if (empty) empty.style.display = list.length ? "none" : "";
+    });
+    // pull in images/stars that the list endpoint omits (raw rows, pre-normalise)
+    await hydrateBlogDetails(blogs || [], (full) => {
+      renderBlogGrid(root, full, { editable: true });
+    });
+  } catch {
+    if (root) root.innerHTML = "";
+    clearBusy(root);
+    if (empty) empty.style.display = "";
   }
 }
 
 async function loadStarredBlogs() {
-  const grid = $("#starred-blogs-grid");
+  const root  = $("#starred-blogs-grid");
   const empty = $("#starred-blogs-empty");
-  empty.hidden = true;
-  grid.innerHTML = "";
-
+  const key   = "me:starred";
+  if (!cacheGet(key)) showSkeletons(root, 3);
+  if (empty) empty.style.display = "none";
   try {
-    const rows = await api("/users/me/starred");
-    const seen = new Set();
-    const blogs = normalizeOwnBlogs(rows, null)
-      .filter((blog) => (seen.has(blog.id) ? false : seen.add(blog.id)))
-      .map((blog) => ({ ...blog, is_starred: true, star_count: Math.max(1, blog.star_count) }));
-    state.starredBlogs = blogs;
-
-    if (!blogs.length) {
-      empty.hidden = false;
-      return;
-    }
-
-    grid.innerHTML = blogs.map((blog, i) => storyCard(blog, i + 1, i)).join("");
-    observeReveals(grid);
-    hydrateCards(blogs, "starred-blogs-grid");
+    const blogs = await cachedFetch(key, () => api("/users/me/starred"), (raw) => {
+      const list = normalizeBlogs(raw);
+      renderBlogGrid(root, list, { editable: false });
+      clearBusy(root);
+      if (empty) empty.style.display = list.length ? "none" : "";
+    });
+    await hydrateBlogDetails(blogs || [], (full) => {
+      renderBlogGrid(root, full, { editable: false });
+    });
   } catch {
-    grid.innerHTML = "";
-    empty.hidden = false;
+    if (root) root.innerHTML = "";
+    clearBusy(root);
+    if (empty) empty.style.display = "";
   }
 }
 
-async function onSaveProfile(event) {
-  event.preventDefault();
-  const button = $("#save-profile-btn");
-  const username = $("#edit-username").value.trim();
-  const bio = $("#edit-bio").value.trim();
+function setProfileTab(tab) {
+  $$(".profile-tabs .tab-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+    b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  });
+  const my  = $("#tab-my-blogs");
+  const st  = $("#tab-starred-blogs");
+  if (my) my.style.display = tab === "my-blogs"      ? "block" : "none";
+  if (st) st.style.display = tab === "starred-blogs" ? "block" : "none";
+  // cards rendered while the tab was hidden never intersected — reveal them now
+  revealAllIn(tab === "my-blogs" ? "#tab-my-blogs" : "#tab-starred-blogs");
+}
 
-  if (!username) {
-    toast("Pick a username.", "error");
-    $("#edit-username").focus();
-    return;
-  }
-
-  setLoading(button, true);
+async function showStarredPage() {
+  showPage("starred");
+  const grid  = $("#starred-page-grid");
+  const empty = $("#starred-page-empty");
+  const key   = "me:starred";
+  if (!cacheGet(key)) showSkeletons(grid, 3);
+  if (empty) empty.style.display = "none";
   try {
-    /* Only these two go up — the photo saves on its own the moment it lands,
-       so re-sending a data URL on every text edit would be wasted bytes. */
-    const updated = await api("/users/me", { method: "PATCH", body: { username, bio } });
-    state.user = { ...state.user, ...updated };
-    paintAccount();
-    toast("Changes saved.", "success");
-    closeProfileEditor();
-    renderProfile();
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    setLoading(button, false);
+    const blogs = await cachedFetch(key, () => api("/users/me/starred"), (raw) => {
+      const list = normalizeBlogs(raw);
+      renderBlogGrid(grid, list, { editable: false });
+      clearBusy(grid);
+      if (empty) empty.style.display = list.length ? "none" : "";
+    });
+    await hydrateBlogDetails(blogs || [], (full) => {
+      renderBlogGrid(grid, full, { editable: false });
+    });
+  } catch {
+    if (grid) grid.innerHTML = "";
+    clearBusy(grid);
+    if (empty) empty.style.display = "";
   }
 }
 
-/* ------------------------------------------------------- avatar pipeline */
+/* ═══════════════════════════════════════════════
+   STAR TOGGLE
+═══════════════════════════════════════════════ */
 
-async function loadImageSource(file) {
-  if (window.createImageBitmap) {
-    try {
-      return await createImageBitmap(file, { imageOrientation: "from-image" });
-    } catch {
-      try {
-        return await createImageBitmap(file);
-      } catch {
-        /* fall through to <img> */
+async function toggleStar(blogId, isStarred, triggerBtn, refreshDetail = false) {
+  if (!state.token) { toast("Please log in to star articles.", "error"); window.location.hash = "#/login"; return; }
+  if (triggerBtn) {
+    triggerBtn.classList.add("star-animate");
+    triggerBtn.addEventListener("animationend", () => triggerBtn.classList.remove("star-animate"), { once: true });
+  }
+  try {
+    await api(`/blogs/${blogId}/star`, { method: isStarred ? "DELETE" : "POST" });
+    const nowStarred = !isStarred;
+    // star counts live in every cached list, so drop them all
+    cacheInvalidate("feed:", "me:starred", "me:blogs", `blog:${blogId}`);
+    toast(nowStarred ? "Starred!" : "Removed star.", nowStarred ? "success" : "");
+
+    // update all card star buttons
+    document.querySelectorAll(`[data-star="${blogId}"]`).forEach((btn) => {
+      btn.dataset.starred = String(nowStarred);
+      btn.classList.toggle("active", nowStarred);
+      btn.setAttribute("aria-pressed", String(nowStarred));
+      const svg = btn.querySelector("svg");
+      if (svg) { svg.setAttribute("fill", nowStarred ? "#d97706" : "none"); svg.setAttribute("stroke", nowStarred ? "#d97706" : "currentColor"); }
+      const countEl = btn.nextElementSibling;
+      if (countEl && /^\d+$/.test(countEl.textContent.trim())) {
+        const cur = parseInt(countEl.textContent, 10) || 0;
+        countEl.textContent = nowStarred ? cur + 1 : Math.max(0, cur - 1);
       }
-    }
-  }
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("That file could not be read as an image."));
-    };
-    image.src = url;
-  });
-}
-
-/* Center-crop to a square so faces do not stretch, downscale, encode small.
-   The result is a data URL because the API takes profile_image as a string —
-   and BlogOwner embeds it in every blog of every list response, so keeping
-   it near 160px WebP matters. */
-async function squareAvatar(file) {
-  const source = await loadImageSource(file);
-  const side = Math.min(source.width, source.height);
-  const sx = (source.width - side) / 2;
-  const sy = (source.height - side) / 2;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = AVATAR_PX;
-  canvas.height = AVATAR_PX;
-  const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(source, sx, sy, side, side, 0, 0, AVATAR_PX, AVATAR_PX);
-  if (source.close) source.close();
-
-  let out = canvas.toDataURL("image/webp", 0.75);
-  if (!out.startsWith("data:image/webp")) out = canvas.toDataURL("image/jpeg", 0.78);
-  return out;
-}
-
-async function acceptAvatar(file) {
-  if (!file) return;
-  if (!file.type.startsWith("image/")) {
-    toast(`${file.name || "That file"} is not an image.`, "error");
-    return;
-  }
-  if (file.size > MAX_IMAGE_BYTES) {
-    toast(`${file.name} is over 10 MB.`, "error");
-    return;
-  }
-
-  const target = $("#avatar-drop");
-  target.classList.add("is-working");
-
-  try {
-    const dataUrl = await squareAvatar(file);
-    const saved = await api("/users/me", { method: "PATCH", body: { profile_image: dataUrl } });
-    state.user = { ...state.user, ...saved };
-    applyAvatar(dataUrl);
-    $("#avatar-clear").hidden = false;
-    toast("Photo updated.", "success");
-  } catch (error) {
-    toast(error.message, "error");
-  } finally {
-    target.classList.remove("is-working");
-  }
-}
-
-async function clearAvatar() {
-  const ok = await confirmAction({
-    title: "Remove your photo?",
-    message: "Your initial is shown instead. You can add a new photo any time.",
-    okLabel: "Remove",
-  });
-  if (!ok) return;
-
-  try {
-    const saved = await api("/users/me", { method: "PATCH", body: { profile_image: null } });
-    state.user = { ...state.user, ...saved, profile_image: null };
-    applyAvatar(avatarFor(state.user));
-    $("#avatar-clear").hidden = true;
-    toast("Photo removed.", "success");
-  } catch (error) {
-    toast(error.message, "error");
-  }
-}
-
-/* Cards already on screen carry the old photo; swap it without a refetch. */
-function applyAvatar(src) {
-  $("#avatar-drop-img").src = src;
-  $("#profile-avatar").src = src;
-  paintAccount();
-
-  const id = state.user?.id;
-  if (!id) return;
-
-  const pools = [state.ownBlogs, state.starredBlogs, state.feed.blogs || []];
-  pools.forEach((pool) =>
-    pool.forEach((blog) => {
-      if (blog.owner?.id === id) blog.owner.profile_image = state.user.profile_image;
-    })
-  );
-
-  $$(".story-card").forEach((card) => {
-    const blogId = Number(card.dataset.card);
-    const match = pools.flat().find((blog) => blog.id === blogId);
-    if (match?.owner?.id === id) {
-      const image = $(".byline-avatar", card);
-      if (image) image.src = src;
-    }
-  });
-}
-
-function openProfileEditor() {
-  $("#profile-edit").hidden = false;
-  $("#edit-profile-toggle").textContent = "Close";
-  $("#edit-username").focus();
-}
-
-function closeProfileEditor() {
-  $("#profile-edit").hidden = true;
-  $("#edit-profile-toggle").textContent = "Edit details";
-}
-
-/* =====================================================================
-   BINDINGS
-   ===================================================================== */
-
-function closeMenu() {
-  $("#user-dropdown")?.classList.remove("open");
-  $("#user-avatar-btn")?.setAttribute("aria-expanded", "false");
-}
-
-function closeTray() {
-  $("#mobile-menu")?.classList.remove("open");
-  $("#hamburger")?.setAttribute("aria-expanded", "false");
-}
-
-function bindMasthead() {
-  $("#hamburger").addEventListener("click", () => {
-    const open = $("#mobile-menu").classList.toggle("open");
-    $("#hamburger").setAttribute("aria-expanded", String(open));
-  });
-
-  $("#user-avatar-btn").addEventListener("click", (event) => {
-    event.stopPropagation();
-    const open = $("#user-dropdown").classList.toggle("open");
-    $("#user-avatar-btn").setAttribute("aria-expanded", String(open));
-  });
-
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest("#user-menu")) closeMenu();
-    if (event.target.closest(".tray-link")) closeTray();
-  });
-
-  const logout = () => {
-    clearSession();
-    toast("Logged out.", "success");
-    if (location.hash && location.hash !== "#/") {
-      location.hash = "#/";
-    } else {
-      route();
-    }
-  };
-  $("#logout-btn").addEventListener("click", logout);
-  $("#mobile-logout-btn").addEventListener("click", logout);
-
-  window.addEventListener(
-    "scroll",
-    () => {
-      $("#masthead").classList.toggle("is-lifted", window.scrollY > 12);
-    },
-    { passive: true }
-  );
-}
-
-function bindSearch() {
-  const nav = $("#global-search");
-  const hero = $("#hero-search-input");
-
-  const run = debounce((value) => {
-    state.search = value.trim();
-    state.page = 1;
-    if ($("#page-feed").classList.contains("active")) {
-      loadFeed();
-    } else {
-      location.hash = "#/"; /* route() loads the feed */
-    }
-  }, 340);
-
-  const wire = (source, mirror) => {
-    source.addEventListener("input", () => {
-      if (mirror.value !== source.value) mirror.value = source.value;
-      run(source.value);
     });
-  };
-  wire(nav, hero);
-  wire(hero, nav);
 
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
-    const tag = document.activeElement?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA") return;
-    event.preventDefault();
-    (window.innerWidth > 1000 ? nav : hero).focus();
-  });
-}
-
-function bindFeedControls() {
-  const toggle = $("#sort-toggle");
-  toggle.addEventListener("click", (event) => {
-    const button = event.target.closest(".ink-switch-btn");
-    if (!button || button.classList.contains("is-on")) return;
-    selectSwitch(toggle, button);
-    state.sort = button.dataset.sort;
-    state.page = 1;
-    loadFeed();
-  });
-
-  $("#pagination").addEventListener("click", (event) => {
-    const button = event.target.closest(".page-btn");
-    if (!button || button.disabled) return;
-    const page = Number(button.dataset.page);
-    if (!page || page === state.page) return;
-    state.page = page;
-    loadFeed();
-    $(".run-bar").scrollIntoView({
-      behavior: prefersReduced() ? "auto" : "smooth",
-      block: "start",
-    });
-  });
-}
-
-function bindDelegates() {
-  document.addEventListener("click", (event) => {
-    const star = event.target.closest("[data-star]");
-    if (star) {
-      event.preventDefault();
-      toggleStar(star.dataset.star);
-      return;
+    // update detail star button
+    const detailBtn = document.querySelector("[data-detail-star]");
+    if (detailBtn) {
+      const svg  = detailBtn.querySelector("svg");
+      const spans = detailBtn.querySelectorAll("span");
+      if (svg)     svg.setAttribute("fill", nowStarred ? "currentColor" : "none");
+      if (spans[0]) spans[0].textContent = nowStarred ? "Starred" : "Star";
+      if (spans[1]) {
+        const cur = parseInt((spans[1].textContent || "").replace(/\D/g, ""), 10) || 0;
+        spans[1].textContent = `(${nowStarred ? cur + 1 : Math.max(0, cur - 1)})`;
+      }
+      detailBtn.className = `btn ${nowStarred ? "btn-primary" : "btn-secondary"} btn-sm`;
+      detailBtn.style.cssText = "display:flex;align-items:center;gap:7px;";
+      detailBtn.setAttribute("aria-pressed", String(nowStarred));
     }
 
-    const remove = event.target.closest("[data-delete-blog]");
-    if (remove) {
-      event.preventDefault();
-      deleteBlog(remove.dataset.deleteBlog);
-      return;
-    }
-
-    const zoom = event.target.closest("[data-zoom]");
-    if (zoom) openZoom(zoom);
-  });
-
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    const zoom = event.target.closest?.("[data-zoom]");
-    if (!zoom) return;
-    event.preventDefault();
-    openZoom(zoom);
-  });
-
-  /* ink bleed follows the pointer */
-  document.addEventListener(
-    "pointermove",
-    (event) => {
-      const button = event.target.closest(".btn");
-      if (!button) return;
-      const rect = button.getBoundingClientRect();
-      button.style.setProperty("--mx", `${event.clientX - rect.left}px`);
-      button.style.setProperty("--my", `${event.clientY - rect.top}px`);
-    },
-    { passive: true }
-  );
+    // update in-memory state
+    const b = state.blogs.find((x) => x.id === blogId);
+    if (b) { b.is_starred = nowStarred; b.star_count = nowStarred ? (b.star_count ?? 0) + 1 : Math.max(0, (b.star_count ?? 1) - 1); }
+  } catch (err) { toast(err.message, "error"); }
 }
 
-function openZoom(node) {
-  if (!state.currentBlog) return;
-  const urls = sortImages(state.currentBlog.images).map((image) => fixImageUrl(image.image_url));
-  openLightbox(urls, Number(node.dataset.zoom));
-}
+/* ═══════════════════════════════════════════════
+   DELETE
+═══════════════════════════════════════════════ */
 
-function bindPasswordToggles() {
-  $$(".password-toggle").forEach((button) => {
-    button.addEventListener("click", () => {
-      const input = $("input", button.parentElement);
-      if (!input) return;
-      const reveal = input.type === "password";
-      input.type = reveal ? "text" : "password";
-      button.setAttribute("aria-label", reveal ? "Hide password" : "Show password");
-      $(".eye-open", button).style.display = reveal ? "none" : "";
-      $(".eye-closed", button).style.display = reveal ? "" : "none";
-    });
-  });
-}
-
-function bindAuthForms() {
-  $("#login-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = $("#login-form button[type=submit]");
-    const error = $("#login-error");
-    error.textContent = "";
-
-    const email = $("#login-email").value.trim();
-    const password = $("#login-password").value;
-    if (!email || !password) {
-      error.textContent = "Enter your email and password.";
-      return;
-    }
-
-    setLoading(button, true);
+function confirmDelete(blogId) {
+  const modal     = $("#confirm-modal");
+  const okBtn     = $("#confirm-ok");
+  const cancelBtn = $("#confirm-cancel");
+  if (!modal) return;
+  modal.classList.add("active");
+  const cleanup = () => modal.classList.remove("active");
+  okBtn.onclick = async () => {
+    cleanup();
     try {
-      const data = await api("/login", { method: "POST", body: { email, password }, auth: false });
-      state.token = data.token;
-      localStorage.setItem(TOKEN_KEY, data.token);
-      await hydrateAuth();
-      $("#login-form").reset();
-      toast(`Welcome back, ${state.user?.username || "reader"}.`, "success");
-      location.hash = "#/";
-      route();
-    } catch (err) {
-      error.textContent = err.message;
-    } finally {
-      setLoading(button, false);
-    }
-  });
-
-  $("#signup-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = $("#signup-form button[type=submit]");
-    const error = $("#signup-error");
-    error.textContent = "";
-
-    const email = $("#signup-email").value.trim();
-    const password = $("#signup-password").value;
-    if (!email || password.length < 6) {
-      error.textContent = "Use a valid email and at least 6 characters.";
-      return;
-    }
-
-    setLoading(button, true);
-    try {
-      await api("/signup", { method: "POST", body: { email, password }, auth: false });
-      const data = await api("/login", { method: "POST", body: { email, password }, auth: false });
-      state.token = data.token;
-      localStorage.setItem(TOKEN_KEY, data.token);
-      await hydrateAuth();
-      $("#signup-form").reset();
-      toast("Account created. Write your first story.", "success");
-      location.hash = "#/create";
-      route();
-    } catch (err) {
-      error.textContent = err.message;
-    } finally {
-      setLoading(button, false);
-    }
-  });
+      await api(`/blogs/${blogId}`, { method: "DELETE" });
+      cacheInvalidate("feed:", "me:blogs", "me:starred", `blog:${blogId}`);
+      toast("Article deleted.", "success");
+      if ((window.location.hash || "").includes(`blog/${blogId}`)) window.location.hash = "#/";
+      else showProfile();
+    } catch (err) { toast(err.message, "error"); }
+  };
+  cancelBtn.onclick = cleanup;
 }
 
-function bindComposer() {
-  const title = $("#create-title");
-  const content = $("#create-content");
-  const visibility = $("#create-visibility");
+/* ═══════════════════════════════════════════════
+   LIGHTBOX
+═══════════════════════════════════════════════ */
 
-  title.addEventListener("input", () => {
-    $("#create-title-count").textContent = String(title.value.length);
-    renderProof();
-  });
-  content.addEventListener("input", debounce(renderProof, 140));
-  visibility.addEventListener("change", () => {
-    $("#visibility-value").textContent = visibility.checked ? "Public" : "Private";
-  });
-
-  state.createBay = createImageBay({
-    mode: "deferred",
-    blogId: null,
-    zone: $("#create-dropzone"),
-    input: $("#create-image-input"),
-    grid: $("#create-image-grid"),
-    countEl: $("#create-image-count"),
-    hintEl: $("#create-reorder-hint"),
-    onChange: renderProof,
-  });
-
-  $("#create-form").addEventListener("submit", onCreateBlog);
+function openLightbox(src) {
+  if (!src) return;
+  const modal = $("#lightbox-modal");
+  const img   = $("#lightbox-img");
+  if (img)   img.src = src;
+  if (modal) modal.classList.add("active");
 }
 
-function bindEditor() {
-  const visibility = $("#edit-visibility");
-
-  $("#edit-title").addEventListener("input", debounce(renderEditProof, 140));
-  $("#edit-content").addEventListener("input", debounce(renderEditProof, 140));
-  visibility.addEventListener("change", () => {
-    $("#edit-visibility-value").textContent = visibility.checked ? "Public" : "Private";
-  });
-
-  state.editBay = createImageBay({
-    mode: "immediate",
-    blogId: null,
-    zone: $("#edit-dropzone"),
-    input: $("#edit-image-input"),
-    grid: $("#edit-image-grid"),
-    countEl: $("#edit-image-count"),
-    hintEl: null,
-    onChange: renderEditProof,
-  });
-
-  $("#edit-form").addEventListener("submit", onUpdateBlog);
+function closeLightbox() {
+  $("#lightbox-modal")?.classList.remove("active");
 }
 
-function bindProfile() {
-  $("#edit-profile-toggle").addEventListener("click", () => {
-    if ($("#profile-edit").hidden) openProfileEditor();
-    else closeProfileEditor();
-  });
+/* ═══════════════════════════════════════════════
+   UTILITIES
+═══════════════════════════════════════════════ */
 
-  $("#cancel-edit-profile").addEventListener("click", () => {
-    closeProfileEditor();
-    $("#edit-username").value = state.user?.username || "";
-    $("#edit-bio").value = state.user?.bio || "";
-  });
-
-  $("#profile-edit-form").addEventListener("submit", onSaveProfile);
-
-  const tabs = $("#profile-tabs");
-  tabs.addEventListener("click", (event) => {
-    const button = event.target.closest(".ink-switch-btn");
-    if (!button || button.classList.contains("is-on")) return;
-    selectSwitch(tabs, button);
-    state.profileTab = button.dataset.tab;
-    $("#tab-my-blogs").hidden = state.profileTab !== "my-blogs";
-    $("#tab-starred-blogs").hidden = state.profileTab !== "starred-blogs";
-  });
-
-  /* avatar: drop a file, click to browse, or paste from the clipboard */
-  const target = $("#avatar-drop");
-  const input = $("#avatar-input");
-
-  bindFileDrop(target, (files) => acceptAvatar(files[0]));
-  bindZoneActivation(target, input);
-  input.addEventListener("change", () => {
-    acceptAvatar(input.files?.[0]);
-    input.value = "";
-  });
-
-  document.addEventListener("paste", (event) => {
-    if (!$("#page-profile").classList.contains("active")) return;
-    if ($("#profile-edit").hidden) return;
-    const item = Array.from(event.clipboardData?.items || []).find((entry) =>
-      entry.type.startsWith("image/")
-    );
-    if (!item) return;
-    event.preventDefault();
-    acceptAvatar(item.getAsFile());
-  });
-
-  $("#avatar-clear").addEventListener("click", clearAvatar);
+/* Sort images by display_order so the cover is deterministic.
+   The backend assigns display_order incrementally on upload. */
+function sortImages(images) {
+  return (images || [])
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
 }
 
-function bindOverlays() {
-  $("#confirm-cancel").addEventListener("click", () => closeConfirm(false));
-  $("#confirm-ok").addEventListener("click", () => closeConfirm(true));
-  $("#confirm-modal").addEventListener("click", (event) => {
-    if (event.target === $("#confirm-modal")) closeConfirm(false);
-  });
+/* Resolve a blog's cover image.
+   NOTE: BlogResponse (schemas.py) does NOT include `thumbnail`, so the API
+   never sends it — `images` is the only image source that survives the
+   response model. We still check `thumbnail` last in case that changes. */
+function primaryImage(blog) {
+  if (!blog) return "";
 
-  $("#lightbox-close").addEventListener("click", closeLightbox);
-  $("#lightbox-prev").addEventListener("click", () => stepLightbox(-1));
-  $("#lightbox-next").addEventListener("click", () => stepLightbox(1));
-  $("#lightbox").addEventListener("click", (event) => {
-    if (event.target === $("#lightbox")) closeLightbox();
-  });
+  const imgs = sortImages(blog.images);
+  for (const entry of imgs) {
+    const url = typeof entry === "string" ? entry : (entry?.image_url || entry?.url || "");
+    if (url && String(url).trim()) return fixImageUrl(String(url).trim());
+  }
 
-  document.addEventListener("keydown", (event) => {
-    const confirmOpen = !$("#confirm-modal").hidden;
-    const lightboxOpen = !$("#lightbox").hidden;
+  if (blog.thumbnail && typeof blog.thumbnail === "string" && blog.thumbnail.trim())
+    return fixImageUrl(blog.thumbnail.trim());
 
-    if (event.key === "Escape") {
-      if (confirmOpen) return closeConfirm(false);
-      if (lightboxOpen) return closeLightbox();
-      closeMenu();
-      closeTray();
-      return;
-    }
-    if (event.key === "Tab" && confirmOpen) {
-      trapFocus($(".dialog", $("#confirm-modal")), event);
-      return;
-    }
-    if (lightboxOpen) {
-      if (event.key === "ArrowLeft") stepLightbox(-1);
-      if (event.key === "ArrowRight") stepLightbox(1);
-    }
-  });
+  return "";
 }
 
-/* ------------------------------------------------------------------ init */
-
-async function init() {
-  if (!document.startViewTransition) document.body.classList.add("no-vt");
-
-  bindWindowDrag();
-  bindMasthead();
-  bindSearch();
-  bindFeedControls();
-  bindDelegates();
-  bindPasswordToggles();
-  bindAuthForms();
-  bindComposer();
-  bindEditor();
-  bindProfile();
-  bindOverlays();
-
-  window.addEventListener("hashchange", route);
-  window.addEventListener(
-    "resize",
-    debounce(() => $$(".ink-switch").forEach(positionSwitch), 120)
-  );
-
-  await hydrateAuth();
-  route();
-
-  $$(".ink-switch").forEach(positionSwitch);
-  /* web fonts change button widths, so re-measure the sliders once loaded */
-  document.fonts?.ready.then(() => $$(".ink-switch").forEach(positionSwitch));
+function fixImageUrl(url) {
+  if (!url) return "";
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
+  if (url.startsWith("/")) return `${API_BASE}${url}`;
+  return `${API_BASE}/${url}`;
 }
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", init);
-} else {
-  init();
+function avatarFor(user) {
+  user = user || {};
+  if (user.profile_image) return user.profile_image;
+  const label = (user.username || user.email || "W").slice(0, 2).toUpperCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" rx="48" fill="#dbeafe"/><text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle" fill="#1e40af" font-family="Arial,sans-serif" font-size="32" font-weight="700">${escHtml(label)}</text></svg>`;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function normalizeBlogs(blogs) {
+  return (blogs || []).map((b) => ({
+    ...b,
+    owner:      b.owner || state.user,
+    images:     sortImages(b.images),
+    star_count: b.star_count ?? b.stars?.length ?? 0,
+  }));
+}
+
+function calcReadTime(text) {
+  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
+  return `${Math.max(1, Math.ceil(words / 200))} min read`;
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return "";
+  const secs = Math.floor((Date.now() - new Date(dateStr)) / 1000);
+  if (secs < 60)   return "Just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400)return `${Math.floor(secs / 3600)}h ago`;
+  if (secs < 2592000) return `${Math.floor(secs / 86400)}d ago`;
+  return formatDate(dateStr);
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+}
+
+function parseJwt(token) {
+  try { return JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))); }
+  catch { return null; }
+}
+
+function escHtml(v) {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+function escAttr(v) { return escHtml(v).replace(/`/g, "&#096;"); }
+
+function setLoading(btn, loading) {
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.classList.toggle("is-loading", loading);
+}
+
+function toast(message, type) {
+  const container = $("#toast-container");
+  if (!container) return;
+
+  const icons = {
+    success: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+    error:   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+    default: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  };
+
+  const node = document.createElement("div");
+  node.className = `toast${type ? " " + type : ""}`;
+  node.innerHTML = `<span class="toast-icon">${icons[type] || icons.default}</span><span>${escHtml(message)}</span>`;
+  container.appendChild(node);
+
+  // fade-out before removal
+  setTimeout(() => {
+    node.style.transition = "opacity 0.3s, transform 0.3s";
+    node.style.opacity = "0";
+    node.style.transform = "translateX(30px)";
+    setTimeout(() => node.remove(), 320);
+  }, 2900);
+}
+
+function debounce(fn, wait) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
 }
