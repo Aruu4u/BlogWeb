@@ -6,7 +6,11 @@ const defaultHost =
   window.location.hostname && window.location.hostname !== "file:" && window.location.hostname !== ""
     ? window.location.hostname : "127.0.0.1";
 
-const API_BASE = localStorage.getItem("blogs_api_base") || "";
+const API_BASE =
+  localStorage.getItem("blogs_api_base") ||
+  (window.location.hostname === "localhost"
+    ? `http://${defaultHost}:8000`
+    : "/api");
 const TOKEN_KEY = "blogs_access_token";
 
 const state = {
